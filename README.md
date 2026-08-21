@@ -103,7 +103,7 @@ Exit with:
 ## 3. Clone and enter the project
 
 ```bash
-git clone <YOUR-GITHUB-REPOSITORY-URL>
+git clone https://github.com/BurnCan/ipo-put-research.git
 cd ipo-put-research
 ```
 
@@ -228,6 +228,35 @@ DATABASE_URL=postgresql+psycopg://ipo_app:your_new_password@localhost:5432/ipo_r
 ```
 
 If the new password contains URL-reserved characters such as `@`, `:`, `/`, `?`, or `#`, URL-encode the password before placing it in `DATABASE_URL`.
+
+### Reset the development database
+
+If you want to test a completely fresh ingest or discard all local prototype data, recreate the database and application role.
+
+**Warning:** this permanently deletes all data currently stored in the local `ipo_research` database.
+
+Open PostgreSQL as the administrator:
+
+```bash
+sudo -u postgres psql```
+
+Then run:
+```sql
+DROP DATABASE IF EXISTS ipo_research;
+DROP ROLE IF EXISTS ipo_app;
+
+CREATE USER ipo_app WITH PASSWORD 'ipo_dev_password';
+CREATE DATABASE ipo_research OWNER ipo_app;
+\q
+```
+
+If PostgreSQL reports that the database is being accessed by other users, stop the FastAPI server and any open psql sessions, then try again.
+
+After recreating the database, make sure your .env uses the matching credentials and run the ingest again:
+
+```bash
+python scripts/ingest_recent_ipos.py --days 365
+```
 
 ### Start PostgreSQL after a reboot
 
