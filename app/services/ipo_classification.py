@@ -1,8 +1,7 @@
 """Conservative, metadata-only IPO candidate classification.
 
-The registration date anchors a 180-day evidence window. A final prospectus is
-only selected when the nearest post-registration 424B4 is not accompanied by
-another 424B4 within three days; that close grouping is treated as ambiguous.
+The registration date anchors a 180-day evidence window. The nearest
+post-registration 424B4 is selected as the final prospectus.
 """
 from __future__ import annotations
 
@@ -20,7 +19,6 @@ PERIODIC_FORMS = {"10-K", "10-Q", "20-F", "6-K"}
 SPAC_TERMS = ("acquisition corp", "acquisition company", "capital corp", "blank check")
 FUND_TERMS = (" fund", " etf", "portfolio", "investment trust")
 MAX_SEQUENCE_DAYS = 180
-AMBIGUITY_DAYS = 3
 logger = logging.getLogger(__name__)
 
 
@@ -46,7 +44,13 @@ def _relevant(filings: list[Filing], anchor: date | None) -> list[Filing]:
 
 
 def find_final_prospectus(ipo: IPO, filings: list[Filing]) -> tuple[Filing | None, bool]:
-    """Return the nearest plausible 424B4 and whether close alternatives make it ambiguous."""
+    """Return the nearest plausible post-registration 424B4.
+
+    Multiple prospectuses may describe the same offering sequence, so proximity
+    alone is not evidence of a conflict.  The boolean is retained for callers
+    that support genuine sequence ambiguity, which metadata-only matching does
+    not currently infer.
+    """
     anchor = _anchor(ipo, filings)
     candidates = sorted(
         (f for f in _relevant(filings, anchor) if f.form_type.upper() == "424B4"),
@@ -54,8 +58,6 @@ def find_final_prospectus(ipo: IPO, filings: list[Filing]) -> tuple[Filing | Non
     )
     if not candidates:
         return None, False
-    if len(candidates) > 1 and (candidates[1].filed_at - candidates[0].filed_at).days <= AMBIGUITY_DAYS:
-        return None, True
     return candidates[0], False
 
 
@@ -88,15 +90,16 @@ def classify_ipo_candidate(ipo: IPO, filings: list[Filing]) -> Classification:
         return Classification("unknown", "needs_review", offering, "Needs review: multiple closely dated 424B4 filings make final-prospectus association ambiguous.", None)
 
     name = ipo.company.name.lower()
-    sequence_evidence = prospectus is not None or any(
+    independent_ipo_signal = any(
         f.form_type.upper() in {"EFFECT", "8-A12B", "8-A12G"} for f in _relevant(filings, anchor)
     )
+    sequence_evidence = prospectus is not None or independent_ipo_signal
     if any(term in name for term in SPAC_TERMS) and sequence_evidence:
         return Classification("spac", "classified", offering, "Likely SPAC: issuer name matches a blank-check/acquisition pattern and registration has subsequent offering evidence.", prospectus)
     if any(term in name for term in FUND_TERMS) and sequence_evidence:
         return Classification("fund", "classified", offering, "Likely fund: issuer name matches a fund/trust pattern and registration has subsequent offering evidence.", prospectus)
-    if prospectus is not None and sequence_evidence:
-        return Classification("operating_company_ipo", "classified", offering, "Likely operating-company IPO: registration is followed by a nearby 424B4 with no prior periodic filing history.", prospectus)
+    if prospectus is not None and independent_ipo_signal:
+        return Classification("operating_company_ipo", "classified", offering, "Likely operating-company IPO: registration is followed by a nearby 424B4 and independent EFFECT or 8-A evidence, with no prior periodic filing history.", prospectus)
     return Classification("unknown", "needs_review", offering, "Needs review: registration metadata lacks enough independent evidence for a confident candidate type.", prospectus)
 
 

@@ -69,14 +69,36 @@ def test_effect_and_rw_statuses():
     assert determine_offering_status(ipo, filings, None) == "withdrawn"
 
 
-def test_prospectus_must_be_nearby_and_close_multiple_are_ambiguous():
+def test_prospectus_must_be_nearby_and_nearest_of_multiple_is_selected():
     ipo, filings = candidate()
     filings.append(filing("424B4", date(2027, 1, 1), 2))
     assert find_final_prospectus(ipo, filings) == (None, False)
-    filings.extend([filing("424B4", date(2026, 2, 1), 3), filing("424B4", date(2026, 2, 3), 4)])
-    assert find_final_prospectus(ipo, filings) == (None, True)
+    nearest = filing("424B4", date(2026, 2, 1), 3)
+    filings.extend([nearest, filing("424B4", date(2026, 2, 3), 4)])
+    assert find_final_prospectus(ipo, filings) == (nearest, False)
     result = classify_ipo_candidate(ipo, filings)
-    assert (result.classification_status, result.offering_status) == ("needs_review", "unknown")
+    assert (result.candidate_type, result.classification_status, result.offering_status) == (
+        "unknown", "needs_review", "priced")
+    assert result.final_prospectus is nearest
+
+
+def test_prospectus_without_independent_ipo_signal_needs_review():
+    ipo, filings = candidate()
+    prospectus = filing("424B4", date(2026, 2, 1), 2)
+    filings.append(prospectus)
+    result = classify_ipo_candidate(ipo, filings)
+    assert (result.candidate_type, result.classification_status, result.offering_status) == (
+        "unknown", "needs_review", "priced")
+    assert result.final_prospectus is prospectus
+
+
+def test_prospectus_with_8a_signal_classifies_operating_company():
+    ipo, filings = candidate()
+    prospectus = filing("424B4", date(2026, 2, 1), 2)
+    filings.extend([filing("8-A12B", date(2026, 1, 29), 3), prospectus])
+    result = classify_ipo_candidate(ipo, filings)
+    assert (result.candidate_type, result.classification_status, result.offering_status) == (
+        "operating_company_ipo", "classified", "priced")
 
 
 def test_service_rerun_is_idempotent_and_schema_serializes_fields():
