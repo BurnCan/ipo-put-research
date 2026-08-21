@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ipo_research
+      POSTGRES_USER: ipo_app
+      POSTGRES_PASSWORD: ipo_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ipo_pgdata:/var/lib/postgresql/data
+
+volumes:
+  ipo_pgdata:

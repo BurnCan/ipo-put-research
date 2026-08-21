@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IPO Put Research</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>IPO Put Research</h1>
+        <p>SEC registration-filing candidates for bearish IPO research.</p>
+      </div>
+      <button id="ingest">Ingest last 365 days</button>
+    </header>
+
+    <section class="controls">
+      <input id="search" placeholder="Search company or ticker…" />
+      <span id="status">Ready</span>
+    </section>
+
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Company</th><th>Ticker</th><th>CIK</th><th>First filing</th>
+            <th>Status</th><th>IPO date</th><th>IPO price</th><th>Unlock</th><th>Filings</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+  </main>
+<script>
+const rows = document.querySelector('#rows');
+const statusEl = document.querySelector('#status');
+const searchEl = document.querySelector('#search');
+
+function fmtMoney(v) { return v == null ? '—' : '$' + Number(v).toFixed(2); }
+function esc(v) { return String(v ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+
+async function load() {
+  const q = encodeURIComponent(searchEl.value.trim());
+  statusEl.textContent = 'Loading…';
+  const r = await fetch('/api/ipos?limit=250' + (q ? '&q=' + q : ''));
+  const data = await r.json();
+  rows.innerHTML = data.map(x => `
+    <tr onclick="window.location='/api/ipos/${x.id}'">
+      <td><strong>${esc(x.company_name)}</strong></td>
+      <td>${esc(x.ticker)}</td>
+      <td class="mono">${esc(x.cik)}</td>
+      <td>${esc(x.first_filing_date)}</td>
+      <td><span class="pill">${esc(x.status)}</span></td>
+      <td>${esc(x.ipo_date)}</td>
+      <td>${fmtMoney(x.ipo_price)}</td>
+      <td>${esc(x.unlock_date)}</td>
+      <td>${esc(x.filing_count)}</td>
+    </tr>`).join('');
+  statusEl.textContent = `${data.length} candidates`;
+}
+
+document.querySelector('#ingest').addEventListener('click', async () => {
+  statusEl.textContent = 'Ingesting SEC filings…';
+  const r = await fetch('/api/ingest/sec?days=365', {method:'POST'});
+  const data = await r.json();
+  statusEl.textContent = `Added ${data.ipo_candidates_created ?? 0} candidates / ${data.filings_created ?? 0} filings`;
+  await load();
+});
+let timer;
+searchEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+load();
+</script>
+</body>
+</html>
