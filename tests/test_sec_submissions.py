@@ -47,7 +47,7 @@ def test_missing_primary_document_uses_filing_index():
     data = payload()
     data["filings"]["recent"]["primaryDocument"][0] = ""
     filing = parse_company_submissions(data, "12345").filings[0]
-    assert filing.sec_url.endswith("/0000012345-26-000010-index.html")
+    assert filing.sec_url.endswith("/000001234526000010-index.html")
 
 
 def test_enrichment_is_idempotent_and_allows_missing_security_metadata():
