@@ -1,7 +1,12 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
+
+
+def utc_now() -> datetime:
+    """Return an aware UTC timestamp (unlike deprecated ``datetime.utcnow``)."""
+    return datetime.now(UTC)
 
 
 class Company(Base):
@@ -12,7 +17,7 @@ class Company(Base):
     name: Mapped[str] = mapped_column(String(255), index=True)
     ticker: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
     exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     filings: Mapped[list["Filing"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     ipo: Mapped["IPO | None"] = relationship(back_populates="company", uselist=False, cascade="all, delete-orphan")
@@ -30,7 +35,7 @@ class Filing(Base):
     filing_path: Mapped[str] = mapped_column(Text)
     sec_url: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(32), default="sec_edgar")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     company: Mapped[Company] = relationship(back_populates="filings")
 
@@ -50,8 +55,16 @@ class IPO(Base):
     locked_shares: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
     unlock_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_type: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown", index=True)
+    classification_status: Mapped[str] = mapped_column(String(32), default="unclassified", server_default="unclassified", index=True)
+    offering_status: Mapped[str] = mapped_column(String(32), default="filed", server_default="filed", index=True)
+    classification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_prospectus_filing_id: Mapped[int | None] = mapped_column(
+        ForeignKey("filings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     company: Mapped[Company] = relationship(back_populates="ipo")
+    final_prospectus: Mapped[Filing | None] = relationship(foreign_keys=[final_prospectus_filing_id])
 
 
 Index("ix_ipo_status_first_filing", IPO.status, IPO.first_filing_date)

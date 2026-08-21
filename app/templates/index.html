@@ -26,7 +26,7 @@
         <thead>
           <tr>
             <th>Company</th><th>Ticker</th><th>CIK</th><th>First filing</th>
-            <th>Status</th><th>IPO date</th><th>IPO price</th><th>Unlock</th><th>Filings</th>
+            <th>Type</th><th>Offering status</th><th>Classification</th><th>IPO date</th><th>IPO price</th><th>Unlock</th><th>Filings</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -52,7 +52,9 @@ async function load() {
       <td>${esc(x.ticker)}</td>
       <td class="mono">${esc(x.cik)}</td>
       <td>${esc(x.first_filing_date)}</td>
-      <td><span class="pill">${esc(x.status)}</span></td>
+      <td>${esc(x.candidate_type)}</td>
+      <td><span class="pill">${esc(x.offering_status)}</span></td>
+      <td title="${esc(x.classification_reason)}">${esc(x.classification_status)}</td>
       <td>${esc(x.ipo_date)}</td>
       <td>${fmtMoney(x.ipo_price)}</td>
       <td>${esc(x.unlock_date)}</td>
