@@ -11,8 +11,19 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 - Serves a searchable browser dashboard.
 - Uses CIK and filing accession numbers for deduplication.
 - Supports idempotent ingestion: rerunning the same date range does not duplicate existing rows.
+- Conservatively classifies candidates from stored SEC filing chronology and associates a plausible final `424B4`.
 
-> **Prototype status:** this is candidate discovery, not yet a definitive list of priced IPOs. Registration statements can include offerings that never price, secondary registrations, uplistings, SPAC-related activity, funds, and other cases. A later enrichment stage will classify candidates and locate final `424B4` prospectuses.
+> **Prototype status:** classifications are heuristic research labels based only on SEC filing metadata, not authoritative legal determinations. Registration statements can represent many transaction types, so uncertain or contradictory cases intentionally remain `unknown` / `needs_review`.
+
+## Research pipeline
+
+```text
+SEC master.idx → IPO candidate discovery → SEC submissions enrichment
+  → Candidate classification → Final prospectus association
+  → Prospectus field extraction → Market/options enrichment → Scoring & backtesting
+```
+
+Only the pipeline through final-prospectus association is implemented. Milestone 2 does not fetch or parse prospectus contents.
 
 ## Recommended environment
 
@@ -118,6 +129,12 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+For development and tests, install the separate development requirements instead:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 You will need to reactivate the environment in each new terminal session:
 
 ```bash
@@ -188,6 +205,54 @@ created again. For a small development run, use:
 python scripts/enrich_sec_submissions.py --limit 25
 ```
 
+### Upgrade an existing database
+
+`create_all()` cannot add columns to an existing table. After pulling Milestone 2, preserve the
+existing data and apply the narrowly scoped, idempotent upgrade (it is safe to rerun):
+
+```bash
+python scripts/upgrade_schema.py
+```
+
+It adds the five classification/prospectus columns and the PostgreSQL prospectus foreign-key
+index; it does not delete or rewrite candidate data. Fresh databases receive the same schema from
+SQLAlchemy metadata.
+
+### Classify candidates
+
+Classification uses only filings already stored by ingest/enrichment and makes no live SEC calls:
+
+```bash
+python scripts/classify_ipo_candidates.py
+python scripts/classify_ipo_candidates.py --limit 25
+```
+
+`--company-id ID` and `--ipo-id ID` can target one record. Runs are idempotent: derived values are
+recomputed deterministically, and the summary reports unchanged rows.
+
+The IPO fields are:
+
+- `candidate_type`: `operating_company_ipo`, `spac`, `fund`, or conservative `unknown` (the model
+  also reserves `secondary_offering`, `uplist`, and `other` for future evidence rules).
+- `classification_status`: `unclassified` before processing, `classified` when evidence is
+  sufficient, or `needs_review` for weak, conflicting, or ambiguous evidence.
+- `offering_status`: `filed` for registration alone, `effective` for a relevant `EFFECT`, `priced`
+  for a confidently linked `424B4`, `withdrawn` for a relevant `RW`, or `unknown` for insufficient
+  or conflicting evidence.
+- `classification_reason`: a concise explanation of the signals used.
+
+Candidate typing requires multiple signals. SPAC and fund name patterns require subsequent offering
+evidence; an ordinary operating-company label requires a nearby final prospectus. Any periodic
+filing (`10-K`, `10-Q`, `20-F`, or `6-K`) predating registration causes review rather than a guess
+between a secondary offering and uplisting.
+
+Final-prospectus association anchors on the first S-1/F-1 date, considers only post-registration
+`424B4` filings within 180 days, and chooses the nearest. If the two nearest candidates are within
+three days, no prospectus is linked and the case is marked `needs_review`. `RW` and `EFFECT` use the
+same window. A confidently linked prospectus remains `priced` despite a later `RW`, because that
+withdrawal may relate to another sequence. This is chronology-based association only: prospectus
+contents are not parsed.
+
 ## 7. Start the web application
 
 ```bash
@@ -214,6 +279,19 @@ http://localhost:8007/docs
 - `GET /api/ipos`
 - `GET /api/ipos/{id}`
 - `POST /api/ingest/sec?days=365`
+
+IPO list/detail responses include classification fields and a `final_prospectus` object (including
+its clickable SEC URL) when associated. The dashboard shows Type, Offering status, and
+Classification without changing the underlying research workflow.
+
+## Testing
+
+Tests use in-memory SQLite and do not call live SEC endpoints:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
 
 ## Database administration
 
@@ -307,20 +385,22 @@ app/
   schemas.py            API schemas
 scripts/
   ingest_recent_ipos.py Command-line ingest entry point
+  enrich_sec_submissions.py SEC metadata enrichment
+  classify_ipo_candidates.py Offline candidate classification
+  upgrade_schema.py      Idempotent Milestone 2 schema upgrade
 tests/
 requirements.txt
+requirements-dev.txt
 .env.example
 docker-compose.yml
 ```
 
-## Immediate next milestones
+## Immediate next milestone
 
-1. Fetch each issuer's SEC submissions history and attach `424B4`, `EFFECT`, `8-A12B`, and subsequent filings.
-2. Classify genuine operating-company IPOs versus secondary offerings, SPACs, funds, and uplistings.
-3. Parse final prospectus fields including ticker, exchange, IPO price, shares offered, post-offering shares outstanding, primary/secondary shares, underwriters, and lockup language.
-4. Store source and confidence metadata for parsed fields.
-5. Add market-price and options-data providers after the IPO dataset is reliable.
-6. Build scoring and backtesting before considering any automated trade execution.
+Parse final-prospectus fields such as IPO price and shares offered. That parsing, market/options
+data, scoring, and trading logic are explicitly outside Milestone 2.
+Later work can store source/confidence metadata for parsed fields, add market/options providers after
+the dataset is reliable, and build scoring and backtesting before considering trade execution.
 
 ## SEC fair-access note
 

@@ -49,6 +49,13 @@ def list_ipos(
             "locked_shares": float(ipo.locked_shares) if ipo.locked_shares is not None else None,
             "unlock_date": ipo.unlock_date,
             "filing_count": count,
+            "candidate_type": ipo.candidate_type,
+            "classification_status": ipo.classification_status,
+            "offering_status": ipo.offering_status,
+            "classification_reason": ipo.classification_reason,
+            "final_prospectus": ({"id": ipo.final_prospectus.id, "filed_at": ipo.final_prospectus.filed_at,
+                                  "accession": ipo.final_prospectus.accession_number, "url": ipo.final_prospectus.sec_url}
+                                 if ipo.final_prospectus else None),
         }
         for ipo, company, count in rows
     ]
@@ -73,6 +80,13 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "ipo_date": ipo.ipo_date,
             "ipo_price": float(ipo.ipo_price) if ipo.ipo_price is not None else None,
             "unlock_date": ipo.unlock_date,
+            "candidate_type": ipo.candidate_type,
+            "classification_status": ipo.classification_status,
+            "offering_status": ipo.offering_status,
+            "classification_reason": ipo.classification_reason,
+            "final_prospectus": ({"id": ipo.final_prospectus.id, "filed_at": ipo.final_prospectus.filed_at,
+                                  "accession": ipo.final_prospectus.accession_number, "url": ipo.final_prospectus.sec_url}
+                                 if ipo.final_prospectus else None),
         },
         "company": {
             "cik": company.cik,
