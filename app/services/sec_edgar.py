@@ -117,7 +117,7 @@ def parse_company_submissions(payload: dict, cik: str) -> SubmissionData:
             continue
         accession_compact = accession.replace("-", "")
         document = documents[index].strip() if index < len(documents) and isinstance(documents[index], str) else ""
-        filename = document or f"{accession}-index.html"
+        filename = document or f"{accession_compact}-index.html"
         filing_path = f"edgar/data/{numeric_cik}/{accession_compact}/{filename}"
         filings.append(SubmissionFiling(accession, form, filed_at, filing_path, f"{SEC_ARCHIVES}/{filing_path}"))
     return SubmissionData(name, ticker, exchange, filings)
