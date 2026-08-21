@@ -171,6 +171,23 @@ A successful first run prints counts similar to:
 
 Running the same command again should produce zero newly created records for data already ingested.
 
+### Enrich discovered issuers
+
+After candidate ingestion, fetch each discovered issuer's SEC submissions metadata:
+
+```bash
+python scripts/enrich_sec_submissions.py
+```
+
+This fills company names, tickers, and exchanges where SEC data is available and attaches later
+filings such as `424B4`, `EFFECT`, `8-A`, `10-Q`, `10-K`, and `8-K` (plus foreign-issuer
+`20-F` and `6-K` filings). The command is idempotent: accession numbers already stored are not
+created again. For a small development run, use:
+
+```bash
+python scripts/enrich_sec_submissions.py --limit 25
+```
+
 ## 7. Start the web application
 
 ```bash
