@@ -1,0 +1,29 @@
+import argparse
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.db import SessionLocal
+from app.services.market_history import create_provider, ingest_market_history
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Incrementally ingest normalized daily market history")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--ipo-id", type=int)
+    parser.add_argument("--ticker")
+    parser.add_argument("--sleep", type=float, default=12.0, help="Seconds between provider requests")
+    parser.add_argument("--refresh", action="store_true", help="Refetch and upsert the initial history range")
+    args = parser.parse_args()
+    provider = create_provider()
+    with SessionLocal() as db:
+        report = ingest_market_history(db, provider, limit=args.limit, ipo_id=args.ipo_id,
+                                       ticker=args.ticker, sleep_seconds=args.sleep, refresh=args.refresh)
+    print(report.to_dict())
+
+
+if __name__ == "__main__":
+    main()

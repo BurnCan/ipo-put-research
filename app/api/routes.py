@@ -1,12 +1,22 @@
 from datetime import date
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.models import Company, Filing, FilingDocument, IPO, IPOFact, IPOLockup
+from app.models import Company, DailyPrice, Filing, FilingDocument, IPO, IPOFact, IPOLockup, IPOMarketSummary
 from app.services.ipo_ingest import ingest_registration_filings
 
 router = APIRouter(prefix="/api")
+
+
+def market_summary_dict(summary):
+    if summary is None:
+        return None
+    fields = ("first_trade_date", "first_day_open", "first_day_close", "latest_trade_date", "latest_close",
+              "post_ipo_high", "first_day_close_return_vs_ipo_price", "return_from_ipo_price",
+              "drawdown_from_post_ipo_high", "as_of_date")
+    return {name: (float(value) if value is not None and name not in {"first_trade_date", "latest_trade_date", "as_of_date"} else value)
+            for name in fields for value in [getattr(summary, name)]}
 
 
 @router.get("/health")
@@ -69,6 +79,7 @@ def list_ipos(
         item["document_cached"] = bool(document and document.fetch_status == "success")
         item["document_sha256"] = document.sha256 if document else None
         item["fact_count"] = db.scalar(select(func.count(IPOFact.id)).where(IPOFact.ipo_id == item["id"])) or 0
+        item["market_summary"] = market_summary_dict(db.scalar(select(IPOMarketSummary).where(IPOMarketSummary.ipo_id == item["id"])))
     return result
 
 
@@ -112,6 +123,7 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "ticker": company.ticker,
             "exchange": company.exchange,
         },
+        "market_summary": market_summary_dict(ipo.market_summary),
         "filings": [
             {
                 "form": f.form_type,
@@ -148,6 +160,19 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "filing_url": lockup.filing.sec_url,
         } for lockup in db.scalars(select(IPOLockup).where(IPOLockup.ipo_id == ipo.id).order_by(IPOLockup.created_at)).all()],
     }
+
+
+@router.get("/ipos/{ipo_id}/prices")
+def ipo_prices(ipo_id: int, limit: int = Query(500, ge=1, le=5000), db: Session = Depends(get_db)):
+    summary = db.scalar(select(IPOMarketSummary).where(IPOMarketSummary.ipo_id == ipo_id))
+    if summary is None:
+        if db.get(IPO, ipo_id) is None:
+            raise HTTPException(status_code=404, detail="IPO not found")
+        return []
+    bars = db.scalars(select(DailyPrice).where(DailyPrice.security_id == summary.security_id)
+                      .order_by(DailyPrice.trade_date.desc()).limit(limit)).all()
+    return [{"date": bar.trade_date, "open": float(bar.open), "high": float(bar.high), "low": float(bar.low),
+             "close": float(bar.close), "volume": bar.volume, "provider": bar.provider} for bar in reversed(bars)]
 
 
 @router.post("/ingest/sec")

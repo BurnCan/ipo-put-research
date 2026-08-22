@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
@@ -21,6 +21,7 @@ class Company(Base):
 
     filings: Mapped[list["Filing"]] = relationship(back_populates="company", cascade="all, delete-orphan")
     ipo: Mapped["IPO | None"] = relationship(back_populates="company", uselist=False, cascade="all, delete-orphan")
+    securities: Mapped[list["Security"]] = relationship(back_populates="company", cascade="all, delete-orphan")
 
 
 class Filing(Base):
@@ -78,6 +79,68 @@ class IPO(Base):
         back_populates="ipo", cascade="all, delete-orphan", foreign_keys="IPOLockup.ipo_id"
     )
     primary_lockup: Mapped["IPOLockup | None"] = relationship(foreign_keys=[primary_lockup_id], post_update=True)
+    market_summary: Mapped["IPOMarketSummary | None"] = relationship(back_populates="ipo", uselist=False, cascade="all, delete-orphan")
+
+
+class Security(Base):
+    """A durable, provider-addressable identity separate from current issuer metadata."""
+    __tablename__ = "securities"
+    __table_args__ = (UniqueConstraint("company_id", "ticker", "source", name="uq_security_company_ticker_source"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    ticker: Mapped[str] = mapped_column(String(24), index=True)
+    exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    security_type: Mapped[str] = mapped_column(String(32), default="common_stock")
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="sec_company")
+    provider_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    company: Mapped[Company] = relationship(back_populates="securities")
+    prices: Mapped[list["DailyPrice"]] = relationship(back_populates="security", cascade="all, delete-orphan")
+
+
+class DailyPrice(Base):
+    __tablename__ = "daily_prices"
+    __table_args__ = (UniqueConstraint("security_id", "trade_date", "provider", name="uq_daily_price_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    security_id: Mapped[int] = mapped_column(ForeignKey("securities.id", ondelete="CASCADE"), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    open: Mapped[float] = mapped_column(Numeric(20, 8))
+    high: Mapped[float] = mapped_column(Numeric(20, 8))
+    low: Mapped[float] = mapped_column(Numeric(20, 8))
+    close: Mapped[float] = mapped_column(Numeric(20, 8))
+    volume: Mapped[int] = mapped_column(BigInteger)
+    adjusted_close: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    provider_symbol: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    security: Mapped[Security] = relationship(back_populates="prices")
+
+
+class IPOMarketSummary(Base):
+    __tablename__ = "ipo_market_summary"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ipo_id: Mapped[int] = mapped_column(ForeignKey("ipos.id", ondelete="CASCADE"), unique=True, index=True)
+    security_id: Mapped[int] = mapped_column(ForeignKey("securities.id", ondelete="CASCADE"), index=True)
+    as_of_date: Mapped[date] = mapped_column(Date)
+    first_trade_date: Mapped[date] = mapped_column(Date)
+    first_day_open: Mapped[float] = mapped_column(Numeric(20, 8))
+    first_day_close: Mapped[float] = mapped_column(Numeric(20, 8))
+    latest_trade_date: Mapped[date] = mapped_column(Date)
+    latest_close: Mapped[float] = mapped_column(Numeric(20, 8))
+    post_ipo_high: Mapped[float] = mapped_column(Numeric(20, 8))
+    first_day_close_return_vs_ipo_price: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    return_from_ipo_price: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    drawdown_from_post_ipo_high: Mapped[float] = mapped_column(Numeric(20, 10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    ipo: Mapped[IPO] = relationship(back_populates="market_summary")
+    security: Mapped[Security] = relationship()
 
 
 class FilingDocument(Base):

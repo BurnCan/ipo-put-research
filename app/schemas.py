@@ -31,3 +31,4 @@ class IPORead(BaseModel):
     offering_status: str = "filed"
     classification_reason: str | None = None
     final_prospectus: dict | None = None
+    market_summary: dict | None = None
