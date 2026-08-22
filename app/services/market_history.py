@@ -97,6 +97,10 @@ def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: i
             start = initial_start if latest is None else latest + timedelta(days=1)
         if start > effective_end:
             report.skipped_current += 1
+            # Summaries are derived state and may be stale even when the raw
+            # history is current (for example, after ipo_price is enriched).
+            recompute_market_summary(db, ipo, security, provider.name)
+            db.commit()
             continue
         if requested and sleep_seconds > 0:
             time.sleep(sleep_seconds)

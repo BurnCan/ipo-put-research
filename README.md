@@ -255,6 +255,19 @@ null while all observed-price fields and drawdown are still calculated. Compact 
 IPO list/detail responses and the dashboard; bounded raw history is available at
 `GET /api/ipos/{id}/prices?limit=500`.
 
+Rebuild this derived cache after changing IPO facts without fetching market history:
+
+```bash
+python scripts/recompute_market_summaries.py
+python scripts/recompute_market_summaries.py --limit 25
+python scripts/recompute_market_summaries.py --ipo-id 14
+python scripts/recompute_market_summaries.py --ticker ALH
+```
+
+The command is offline and idempotent: it reads only stored `daily_prices` for the configured market
+data provider and **does not contact Massive**. A normal incremental ingestion run also rebuilds a
+summary from stored bars when that security is already current, without making a provider request.
+
 ### Market-data limitations
 
 Massive Basic may return only the history covered by the current plan. Partial/no data is reported
