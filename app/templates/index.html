@@ -26,7 +26,7 @@
         <thead>
           <tr>
             <th>Company</th><th>Ticker</th><th>CIK</th><th>First filing</th>
-            <th>Type</th><th>Offering status</th><th>Classification</th><th>IPO date</th><th>IPO price</th><th>Latest</th><th>Return vs IPO</th><th>Drawdown</th><th>Shares offered</th><th>Deal size</th><th>Parsed</th><th>Primary Lockup</th><th>Filings</th>
+            <th>Type</th><th>Offering status</th><th>Classification</th><th>IPO date</th><th>IPO price</th><th>Latest</th><th>Return vs IPO</th><th>Drawdown</th><th>Shares offered</th><th>Deal size</th><th>Parsed</th><th>Lockup date</th><th>Event status</th><th>-20d momentum</th><th>-10d momentum</th><th>Post +5</th><th>Filings</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -66,6 +66,10 @@ async function load() {
       <td>${fmtMoney(x.deal_size)}</td>
       <td>${x.fact_count ? '✓ ' + esc(x.fact_count) : '—'}</td>
       <td>${esc(x.primary_lockup_expiration_date)}</td>
+      <td><span class="pill">${esc(x.primary_lockup_event?.event_status)}</span></td>
+      <td>${fmtPercent(x.primary_lockup_event?.pre_20d_return)}</td>
+      <td>${fmtPercent(x.primary_lockup_event?.pre_10d_return)}</td>
+      <td>${fmtPercent(x.primary_lockup_event?.post_5d_return)}</td>
       <td>${esc(x.filing_count)}</td>
     </tr>`).join('');
   statusEl.textContent = `${data.length} candidates`;

@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.models import Company, DailyPrice, Filing, FilingDocument, IPO, IPOFact, IPOLockup, IPOMarketSummary
+from app.models import (Company, DailyPrice, Filing, FilingDocument, IPO, IPOFact, IPOLockup,
+                        IPOMarketSummary, LockupEventAnalysis, LockupSignalSnapshot)
 from app.services.ipo_ingest import ingest_registration_filings
 
 router = APIRouter(prefix="/api")
@@ -17,6 +18,17 @@ def market_summary_dict(summary):
               "drawdown_from_post_ipo_high", "as_of_date")
     return {name: (float(value) if value is not None and name not in {"first_trade_date", "latest_trade_date", "as_of_date"} else value)
             for name in fields for value in [getattr(summary, name)]}
+
+
+def _analysis_dict(row):
+    if row is None: return None
+    fields = ("event_date", "event_trade_date", "event_status", "pre_20d_return", "pre_10d_return",
+              "pre_5d_return", "pre_1d_return", "event_close_return", "post_1d_return", "post_5d_return",
+              "post_10d_return", "post_20d_return", "post_40d_return", "event_volume_ratio",
+              "max_post_event_session_available")
+    return {field: (float(value) if value is not None and field not in
+                    {"event_date", "event_trade_date", "event_status", "max_post_event_session_available"} else value)
+            for field in fields for value in [getattr(row, field)]}
 
 
 @router.get("/health")
@@ -80,6 +92,8 @@ def list_ipos(
         item["document_sha256"] = document.sha256 if document else None
         item["fact_count"] = db.scalar(select(func.count(IPOFact.id)).where(IPOFact.ipo_id == item["id"])) or 0
         item["market_summary"] = market_summary_dict(db.scalar(select(IPOMarketSummary).where(IPOMarketSummary.ipo_id == item["id"])))
+        item["primary_lockup_event"] = _analysis_dict(db.scalar(select(LockupEventAnalysis).where(
+            LockupEventAnalysis.ipo_id == item["id"], LockupEventAnalysis.lockup_id == db.get(IPO, item["id"]).primary_lockup_id)))
     return result
 
 
@@ -124,6 +138,8 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "exchange": company.exchange,
         },
         "market_summary": market_summary_dict(ipo.market_summary),
+        "primary_lockup_event": _analysis_dict(db.scalar(select(LockupEventAnalysis).where(
+            LockupEventAnalysis.ipo_id == ipo.id, LockupEventAnalysis.lockup_id == ipo.primary_lockup_id))),
         "filings": [
             {
                 "form": f.form_type,
@@ -160,6 +176,25 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "filing_url": lockup.filing.sec_url,
         } for lockup in db.scalars(select(IPOLockup).where(IPOLockup.ipo_id == ipo.id).order_by(IPOLockup.created_at)).all()],
     }
+
+
+@router.get("/ipos/{ipo_id}/lockup-snapshots")
+def lockup_snapshots(ipo_id: int, db: Session = Depends(get_db)):
+    ipo = db.get(IPO, ipo_id)
+    if ipo is None:
+        raise HTTPException(status_code=404, detail="IPO not found")
+    rows = db.scalars(select(LockupSignalSnapshot).where(
+        LockupSignalSnapshot.ipo_id == ipo_id,
+        LockupSignalSnapshot.lockup_id == ipo.primary_lockup_id
+    ).order_by(LockupSignalSnapshot.observation_offset)).all()
+    fields = ("observation_offset", "observation_date", "data_cutoff_date", "trading_sessions_to_event",
+              "close", "return_from_ipo_price", "return_5d", "return_10d", "return_20d", "return_40d",
+              "drawdown_from_post_ipo_high", "position_in_post_ipo_range", "avg_volume_20d",
+              "realized_vol_20d", "available_history_sessions")
+    non_numeric = {"observation_offset", "observation_date", "data_cutoff_date", "trading_sessions_to_event",
+                   "available_history_sessions"}
+    return [{name: (float(value) if value is not None and name not in non_numeric else value)
+             for name in fields for value in [getattr(row, name)]} for row in rows]
 
 
 @router.get("/ipos/{ipo_id}/prices")
