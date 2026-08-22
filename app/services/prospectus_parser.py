@@ -4,8 +4,9 @@ from decimal import Decimal
 import re
 
 PARSER_NAME = "final_prospectus_offering"
-PARSER_VERSION = "2"
+PARSER_VERSION = "4"
 CANONICAL_PROMOTION_CONFIDENCE = Decimal("0.90")
+
 
 @dataclass(frozen=True)
 class ParsedFact:
@@ -18,23 +19,60 @@ class ParsedFact:
     is_derived: bool = False
     derivation: str | None = None
 
+
 def _number(value: str) -> Decimal:
     return Decimal(value.replace(",", ""))
 
-def _fact(field, match, group, unit, confidence, locator="Prospectus cover"):
+
+def _fact(field, match, group, unit, confidence, locator="Prospectus cover", value=None):
     excerpt = re.sub(r"\s+", " ", match.group(0)).strip()[:500]
-    return ParsedFact(field, _number(match.group(group)), unit, Decimal(confidence), excerpt, locator)
+    parsed = _number(match.group(group)) if value is None else Decimal(value)
+    return ParsedFact(field, parsed, unit, Decimal(confidence), excerpt, locator)
+
+
+def _first_match(patterns: list[str], text: str):
+    """Return the earliest match, using pattern order to break position ties."""
+    matches = [(m.start(), index, m) for index, pattern in enumerate(patterns)
+               if (m := re.search(pattern, text, re.I | re.M))]
+    return min(matches, default=(None, None, None))[2]
+
+
+_SUMMARY_LABEL = re.compile(
+    r"(?:common\s+stock\s+offered\s+by\s+(?:us|the\s+selling\s+stockholders)|"
+    r"common\s+stock\s+outstanding\s+immediately\s+after\s+giving\s+effect\s+to\s+this\s+offering|"
+    r"common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering|"
+    r"class\s+[A-Za-z0-9]+\s+common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering|"
+    r"total\s+class\s+[A-Za-z0-9]+(?:\s+and\s+class\s+[A-Za-z0-9]+)+\s+common\s+stock\s+"
+    r"to\s+be\s+outstanding\s+after\s+this\s+offering)", re.I)
+
+
+def _offering_summary_contexts(text: str) -> list[str]:
+    """Find strong summary labels globally, then expose only nearby text."""
+    labels = list(_SUMMARY_LABEL.finditer(text))
+    contexts = []
+    for index, label in enumerate(labels):
+        # A value normally immediately follows its label. The cap also leaves
+        # room for a parenthetical option count without exposing the rest of
+        # the prospectus to offering-field patterns.
+        end = min(len(text), label.end() + 600)
+        if index + 1 < len(labels):
+            end = min(end, labels[index + 1].start())
+        contexts.append(text[label.start():end])
+    return contexts
+
 
 def extract_ipo_facts(text: str) -> list[ParsedFact]:
-    """Extract only explicit offering language; unrelated share figures are ignored."""
-    # Cover-page evidence is normally at the start; a bounded window prevents later
-    # historical financing and option-plan language becoming offering totals.
+    """Extract explicit base-offering language; optional share counts are ignored."""
+    # Offering summaries can follow the literal cover, but this remains tightly
+    # bounded so option-plan and historical-financing disclosures are excluded.
     cover = text[:20000]
+    summary_contexts = _offering_summary_contexts(text)
     facts: list[ParsedFact] = []
-    # These deliberately require an explicit public/offering-price label.  A broad
-    # "$X per share" match would pick up dilution, option plans and financings.
+
     price_patterns = [
         r"initial\s+public\s+offering\s+price\s+per\s+share\s+(?:will\s+be|is)\s*\$\s*(\d+(?:\.\d+)?)",
+        # Security description is bounded and may not cross sentence punctuation.
+        r"(?:initial\s+)?public\s+offering\s+price\s+of\s+[^.!?\n]{1,120}?\s+is\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
         r"initial\s+public\s+offering\s+price\s+(?:of|:)\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
         r"(?:initial\s+public\s+)?offering\s+price\s+is\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
         r"public\s+offering\s+price\s*:\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
@@ -44,44 +82,119 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
         facts.extend(_fact("ipo_price", match, 1, "USD/share", "0.99")
                      for match in re.finditer(pattern, cover, re.I))
 
+    # Cover pricing tables put the per-share amount first. Requiring the next
+    # normalized line and a plausible per-share magnitude prevents selecting the
+    # total offering proceeds on the following line.
+    table_pattern = (r"(?im)^\s*(?:initial\s+)?public\s+offering\s+price\s*$"
+                     r"\s*^\s*\$\s*(\d{1,4}(?:\.\d{1,4})?)\s*$")
+    facts.extend(_fact("ipo_price", match, 1, "USD/share", "0.99", "Prospectus cover pricing table")
+                 for match in re.finditer(table_pattern, cover))
+
     primary_patterns = [
-        r"(?:we|the company) (?:are|is) offering\s+([\d,]+)\s+shares",
-        r"([\d,]+)\s+shares (?:are being )?offered by (?:us|the company)",
+        r"(?:common stock|shares of common stock)\s+offered\s+by\s+(?:us|the company)\s*[:\-]?\s*(None\.?|[\d,]+\s+shares)",
+        r"(?:we|the company)\s+(?:are|is)\s+offering\s+([\d,]+)\s+shares",
+        r"([\d,]+)\s+shares\s+(?:are being )?offered\s+by\s+(?:us|the company)",
     ]
     secondary_patterns = [
-        r"selling (?:stockholders|shareholders) (?:are )?offering\s+([\d,]+)\s+shares",
-        r"([\d,]+)\s+shares (?:are being )?offered by (?:the )?selling (?:stockholders|shareholders)",
-        # Bounded to one sentence on the cover so later descriptions of a
-        # principal shareholder's transactions cannot become offering facts.
+        r"(?:common stock|shares of common stock)\s+offered\s+by\s+(?:the\s+)?selling\s+(?:stockholders|shareholders)\s*[:\-]?\s*(None\.?|[\d,]+\s+shares)",
+        r"all\s+of\s+the\s+([\d,]+)\s+shares\s+of\s+common\s+stock\s+are\s+being\s+sold\s+by\s+(?:the\s+)?selling\s+(?:stockholders|shareholders)",
+        r"selling\s+(?:stockholders|shareholders)\s+(?:are\s+)?offering\s+([\d,]+)\s+shares",
+        r"([\d,]+)\s+shares\s+(?:are being )?offered\s+by\s+(?:the\s+)?selling\s+(?:stockholders|shareholders)",
         r"our principal (?:stockholder|shareholder)[^.!?]{0,400}?\bis offering\s+([\d,]+)\s+shares",
     ]
-    primary = next((re.search(p, cover, re.I) for p in primary_patterns if re.search(p, cover, re.I)), None)
-    secondary = next((re.search(p, cover, re.I) for p in secondary_patterns if re.search(p, cover, re.I)), None)
-    if primary: facts.append(_fact("primary_shares", primary, 1, "shares", "0.96"))
-    if secondary: facts.append(_fact("secondary_shares", secondary, 1, "shares", "0.96"))
+    primary = _first_match(primary_patterns, cover)
+    secondary = _first_match(secondary_patterns, cover)
 
-    total_matches = list(re.finditer(r"(?:a total of|offering consists of|offering of)\s+([\d,]+)\s+shares", cover, re.I))
+    summary_primary_pattern = (
+        r"common\s+stock\s+offered\s+by\s+us\s*[:\-]?\s*(None\.?|[\d,]+\s+shares)")
+    summary_secondary_pattern = (
+        r"common\s+stock\s+offered\s+by\s+the\s+selling\s+stockholders\s*[:\-]?\s*"
+        r"(None\.?|[\d,]+\s+shares)")
+    if primary is None:
+        primary = next((match for context in summary_contexts
+                        if (match := re.search(summary_primary_pattern, context, re.I))), None)
+    if secondary is None:
+        secondary = next((match for context in summary_contexts
+                          if (match := re.search(summary_secondary_pattern, context, re.I))), None)
+
+    pure_secondary = re.search(
+        r"all\s+of\s+the\s+([\d,]+)\s+shares\s+of\s+common\s+stock\s+are\s+being\s+sold\s+by\s+"
+        r"(?:the\s+)?selling\s+(?:stockholders|shareholders)", cover, re.I)
+    # Unlike ordinary selling-holder language, "all of the N shares" explicitly
+    # establishes both that the issuer component is zero and that N is the base
+    # offering total.
+    if pure_secondary:
+        primary = None
+
+    def component_fact(field, match):
+        raw = match.group(1)
+        if raw.lower().startswith("none"):
+            return _fact(field, match, 1, "shares", "0.99", "Offering summary", value="0")
+        # Summary captures include the word shares; _number needs only the digits.
+        numeric = re.search(r"[\d,]+", raw).group(0)
+        return _fact(field, match, 1, "shares", "0.98", value=_number(numeric))
+
+    if pure_secondary:
+        facts.append(_fact("primary_shares", pure_secondary, 1, "shares", "0.99",
+                           value="0"))
+    elif primary:
+        facts.append(component_fact("primary_shares", primary))
+    if secondary:
+        facts.append(component_fact("secondary_shares", secondary))
+
+    total_matches = list(re.finditer(
+        r"(?:a total of|offering consists of|offering of)\s+([\d,]+)\s+shares", cover, re.I))
     distinct = {_number(m.group(1)) for m in total_matches}
     if len(distinct) == 1:
         facts.append(_fact("shares_offered", total_matches[0], 1, "shares", "0.96"))
     elif len(distinct) > 1:
         facts.extend(_fact("shares_offered", m, 1, "shares", "0.80") for m in total_matches)
-    if primary and secondary:
-        primary_value = _number(primary.group(1))
-        secondary_value = _number(secondary.group(1))
-        facts.append(ParsedFact(
-            "shares_offered", primary_value + secondary_value, "shares", Decimal("0.96"),
-            "Derived from explicit issuer and selling-stockholder shares on the prospectus cover",
-            "Prospectus cover", True, "primary_shares + secondary_shares"))
-    elif not total_matches and primary and not secondary:
-        facts.append(ParsedFact("shares_offered", _number(primary.group(1)), "shares", Decimal("0.94"),
-                                re.sub(r"\s+", " ", primary.group(0))[:500], "Prospectus cover", True, "primary_shares (no selling shares stated)"))
-    elif not total_matches and secondary and not primary:
-        facts.append(ParsedFact("shares_offered", _number(secondary.group(1)), "shares", Decimal("0.94"),
-                                re.sub(r"\s+", " ", secondary.group(0))[:500], "Prospectus cover", True, "secondary_shares (no company shares stated)"))
 
-    post = re.search(r"([\d,]+)\s+shares (?:of (?:our )?(?:common stock|ordinary shares) )?will be outstanding immediately (?:after|following) (?:this|the) offering", text, re.I)
-    if not post:
-        post = re.search(r"shares outstanding immediately (?:after|following) (?:this|the) offering\s*[:\-]?\s*([\d,]+)", text, re.I)
-    if post: facts.append(_fact("shares_outstanding_post_ipo", post, 1, "shares", "0.96", "Offering summary"))
+    primary_value = next((f.value for f in facts if f.field_name == "primary_shares"), None)
+    secondary_value = next((f.value for f in facts if f.field_name == "secondary_shares"), None)
+    if primary_value is not None and secondary_value is not None:
+        facts.append(ParsedFact(
+            "shares_offered", primary_value + secondary_value, "shares", Decimal("0.98"),
+            "Derived from explicit issuer and selling-stockholder base offering shares",
+            "Prospectus cover / offering summary", True, "primary_shares + secondary_shares"))
+    elif (not total_matches and primary and secondary_value is None
+          and re.match(r"(?:we|the company)\s+(?:are|is)\s+offering", primary.group(0), re.I)):
+        # "We are offering N" is itself a direct statement of the base offering
+        # count, rather than an inference that an unstated secondary side is zero.
+        facts.append(ParsedFact("shares_offered", primary_value, "shares", Decimal("0.94"),
+                                re.sub(r"\s+", " ", primary.group(0))[:500], "Prospectus cover",
+                                False, None))
+    elif not total_matches and secondary and primary_value is None:
+        # The pure-secondary "all of the N shares" construction explicitly gives
+        # the total. Other isolated secondary component wording does not.
+        if pure_secondary:
+            facts.append(ParsedFact("shares_offered", secondary_value, "shares", Decimal("0.98"),
+                                    re.sub(r"\s+", " ", secondary.group(0))[:500],
+                                    "Prospectus cover", False, None))
+
+    # Prefer an explicit aggregate across classes. If none exists, accept only a
+    # non-class-specific post-offering label; never sum class counts ourselves.
+    post_total_pattern = (
+        r"total\s+class\s+[A-Za-z0-9]+(?:\s+and\s+class\s+[A-Za-z0-9]+)+\s+common\s+stock\s+"
+        r"to\s+be\s+outstanding\s+after\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares")
+    post_patterns = [
+        r"(?:shares\s+of\s+)?common\s+stock\s+outstanding\s+immediately\s+after\s+giving\s+effect\s+to\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
+        r"(?:shares\s+of\s+)?common\s+stock\s+(?:to\s+be\s+)?outstanding\s+immediately\s+(?:after|following)\s+(?:this|the)\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
+        r"common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
+        r"([\d,]+)\s+shares\s+of\s+(?:our\s+)?(?:common stock|ordinary shares)\s+will\s+be\s+outstanding\s+immediately\s+(?:after|following)\s+(?:this|the)\s+offering",
+    ]
+    class_post_pattern = (
+        r"class\s+[A-Za-z0-9]+\s+common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering"
+        r"\s*[:\-]?\s*([\d,]+)\s+shares")
+    post_total = next((match for context in summary_contexts
+                       if (match := re.search(post_total_pattern, context, re.I))), None)
+    post = post_total
+    if post is None:
+        post = next((_first_match(post_patterns, context) for context in summary_contexts
+                     if _first_match(post_patterns, context)), None)
+    if post is None:
+        post = next((match for context in summary_contexts
+                     if (match := re.search(class_post_pattern, context, re.I))), None)
+    if post:
+        facts.append(_fact("shares_outstanding_post_ipo", post, 1, "shares", "0.98", "Offering summary"))
     return facts

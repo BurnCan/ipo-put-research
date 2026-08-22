@@ -12,7 +12,13 @@ if __name__ == "__main__":
     parser.add_argument("--ipo-id", type=int)
     parser.add_argument("--reparse", action="store_true")
     parser.add_argument("--refetch", action="store_true")
+    parser.add_argument("--classification-status")
+    parser.add_argument("--candidate-type")
+    parser.add_argument("--offering-status")
     args = parser.parse_args()
     with SessionLocal() as db:
         print(process_final_prospectuses(db, limit=args.limit, ipo_id=args.ipo_id,
-                                        reparse=args.reparse, refetch=args.refetch))
+                                        reparse=args.reparse, refetch=args.refetch,
+                                        classification_status=args.classification_status,
+                                        candidate_type=args.candidate_type,
+                                        offering_status=args.offering_status))
