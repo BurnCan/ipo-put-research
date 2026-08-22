@@ -66,10 +66,18 @@ class IPO(Base):
     final_prospectus_filing_id: Mapped[int | None] = mapped_column(
         ForeignKey("filings.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    primary_lockup_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ipo_lockups.id", ondelete="SET NULL", use_alter=True), nullable=True, index=True
+    )
+    primary_lockup_expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
 
     company: Mapped[Company] = relationship(back_populates="ipo")
     final_prospectus: Mapped[Filing | None] = relationship(foreign_keys=[final_prospectus_filing_id])
     facts: Mapped[list["IPOFact"]] = relationship(back_populates="ipo", cascade="all, delete-orphan")
+    lockups: Mapped[list["IPOLockup"]] = relationship(
+        back_populates="ipo", cascade="all, delete-orphan", foreign_keys="IPOLockup.ipo_id"
+    )
+    primary_lockup: Mapped["IPOLockup | None"] = relationship(foreign_keys=[primary_lockup_id], post_update=True)
 
 
 class FilingDocument(Base):
@@ -115,6 +123,38 @@ class IPOFact(Base):
     derivation: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     ipo: Mapped[IPO] = relationship(back_populates="facts")
+    filing: Mapped[Filing] = relationship()
+
+
+class IPOLockup(Base):
+    """One agreement-level lockup observation and its exact parser provenance."""
+    __tablename__ = "ipo_lockups"
+    __table_args__ = (
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_ipo_lockups_confidence"),
+        UniqueConstraint("evidence_key", name="uq_ipo_lockups_evidence_key"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ipo_id: Mapped[int] = mapped_column(ForeignKey("ipos.id", ondelete="CASCADE"), index=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("filings.id", ondelete="CASCADE"), index=True)
+    holder_group: Mapped[str] = mapped_column(String(32), index=True)
+    holder_group_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lockup_type: Mapped[str] = mapped_column(String(32), index=True)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stated_expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    calculated_expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shares_locked: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
+    percentage_locked: Mapped[float | None] = mapped_column(Numeric(7, 4), nullable=True)
+    percentage_is_derived: Mapped[bool] = mapped_column(Boolean, default=False)
+    early_release_exists: Mapped[bool] = mapped_column(Boolean, default=False)
+    early_release_terms: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Numeric(5, 4))
+    parser_name: Mapped[str] = mapped_column(String(64))
+    parser_version: Mapped[str] = mapped_column(String(32))
+    source_excerpt: Mapped[str] = mapped_column(Text)
+    source_locator: Mapped[str] = mapped_column(String(160))
+    evidence_key: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    ipo: Mapped[IPO] = relationship(back_populates="lockups", foreign_keys=[ipo_id])
     filing: Mapped[Filing] = relationship()
 
 

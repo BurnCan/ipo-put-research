@@ -24,6 +24,7 @@ class IPORead(BaseModel):
     fact_count: int = 0
     locked_shares: float | None = None
     unlock_date: date | None = None
+    primary_lockup_expiration_date: date | None = None
     filing_count: int = 0
     candidate_type: str = "unknown"
     classification_status: str = "unclassified"
