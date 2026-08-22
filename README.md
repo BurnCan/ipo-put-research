@@ -504,9 +504,9 @@ offering value, not issuer net proceeds.
 
 ### Parsed fields and limitations
 
-Parser `final_prospectus_offering` version `3` attempts only `ipo_price`, `shares_offered`,
+Parser `final_prospectus_offering` version `4` attempts only `ipo_price`, `shares_offered`,
 `primary_shares`, `secondary_shares`, `shares_outstanding_post_ipo`, and derived `deal_size`. It prioritizes
-explicit cover/summary language and avoids authorized, option-plan, over-allotment, historical-financing,
+explicit cover and bounded contexts around offering-summary labels found throughout the document, and avoids authorized, option-plan, over-allotment, historical-financing,
 pre-offering, fully diluted, option, and warrant counts. It recognizes bounded final-price sentences and
 simple cover pricing tables, explicit issuer/selling-holder allocations (including `None`), and common
 post-offering outstanding labels. Ambiguous language is intentionally unpromoted.
