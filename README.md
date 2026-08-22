@@ -158,6 +158,8 @@ SEC_USER_AGENT=IPO Research Prototype your-email@example.com
 FILING_CACHE_DIR=./data/filings
 MARKET_DATA_PROVIDER=massive
 MASSIVE_API_KEY=your-api-key-here
+MARKET_INITIAL_LOOKBACK_DAYS=730
+MARKET_REFRESH_DAYS=30
 ```
 
 ### Change the SEC contact email
@@ -195,12 +197,16 @@ raw close is never silently replaced by an adjusted value.
 does not delete old observations. Initialization from SEC company metadata is deterministic and
 idempotent. `daily_prices` retains the provider and provider symbol on every normalized observation.
 
-The first fetch starts at the IPO date when known, otherwise the first filing date or a bounded
-two-year fallback. The earliest returned bar establishes the observed first trading day; it does not
-modify `IPO.ipo_date`. Later runs start at `latest_trade_date + 1 day`, skip requests when already
-current, and enforce database uniqueness by security/date/provider. `--refresh` refetches the wider
-range and upserts rather than duplicating observations. `--sleep` defaults to a conservative 12
-seconds between symbols; transient 408/429/5xx responses use bounded exponential retry/backoff.
+The first fetch starts at the IPO date when known. When it is unknown, the fetch uses the bounded
+`MARKET_INITIAL_LOOKBACK_DAYS` provider lookback (two years by default); the SEC registration's
+`first_filing_date` is never treated as evidence that trading began. The earliest returned bar
+establishes the observed first trading day; it does not modify `IPO.ipo_date`. Later runs start at
+`latest_trade_date + 1 day`, skip requests when already current, and enforce database uniqueness by
+security/date/provider. `--refresh` re-fetches and upserts only the most recent
+`MARKET_REFRESH_DAYS` calendar days (30 by default), preserving older bars while allowing recent
+provider corrections. Use `--refresh-days N` to override that window explicitly. `--sleep` defaults
+to a conservative 12 seconds between symbols; transient 408/429/5xx responses use bounded
+exponential retry/backoff.
 
 Run the idempotent schema upgrade and an ingestion batch from the repository root:
 
@@ -210,6 +216,7 @@ python scripts/ingest_market_history.py --limit 5
 python scripts/ingest_market_history.py --ipo-id 14
 python scripts/ingest_market_history.py --ticker ALH
 python scripts/ingest_market_history.py --ticker ALH --refresh --sleep 12
+python scripts/ingest_market_history.py --ticker ALH --refresh --refresh-days 90
 ```
 
 ### Market summary metrics
