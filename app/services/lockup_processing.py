@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session, joinedload
 from app.models import Filing, FilingDocument, IPO, IPOLockup
 from app.services.lockup_parser import PARSER_NAME, PARSER_VERSION, ParsedLockup, extract_lockup_agreements
 
-PRINCIPAL_GROUPS = {"existing_stockholders", "pre_ipo_investors", "directors_officers", "selling_stockholders"}
+PRINCIPAL_GROUP_PRIORITY = (
+    "existing_stockholders",
+    "pre_ipo_investors",
+    "selling_stockholders",
+    "directors_officers",
+)
 PRIMARY_MIN_CONFIDENCE = 0.90
 
 
@@ -48,17 +53,24 @@ def store_lockups(db: Session, ipo: IPO, filing_id: int, items: list[ParsedLocku
 def select_primary_lockup(db: Session, ipo: IPO) -> dict[str, int]:
     """Promote only dated, high-confidence shareholder underwriter agreements.
 
-    Multiple evidence rows agreeing on a date are compatible. Two or more distinct
-    dates at the principal confidence level are materially conflicting.
+    Evidence from the most research-relevant holder group wins. Multiple rows in
+    that tier agreeing on a date are compatible; distinct dates in that tier are
+    materially conflicting.
     """
     candidates = [row for row in db.scalars(select(IPOLockup).where(
         IPOLockup.ipo_id == ipo.id,
         IPOLockup.lockup_type == "underwriter_lockup",
-        IPOLockup.holder_group.in_(PRINCIPAL_GROUPS),
+        IPOLockup.holder_group.in_(PRINCIPAL_GROUP_PRIORITY),
         IPOLockup.confidence >= PRIMARY_MIN_CONFIDENCE,
     )).all() if row.stated_expiration_date or row.calculated_expiration_date]
+    selected_tier = next(
+        (group for group in PRINCIPAL_GROUP_PRIORITY
+         if any(row.holder_group == group for row in candidates)),
+        None,
+    )
+    tier_candidates = [row for row in candidates if row.holder_group == selected_tier]
     by_date: dict = {}
-    for row in candidates:
+    for row in tier_candidates:
         expiration = row.stated_expiration_date or row.calculated_expiration_date
         by_date.setdefault(expiration, []).append(row)
     if len(by_date) != 1:
