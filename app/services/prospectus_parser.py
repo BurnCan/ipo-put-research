@@ -4,7 +4,7 @@ from decimal import Decimal
 import re
 
 PARSER_NAME = "final_prospectus_offering"
-PARSER_VERSION = "3"
+PARSER_VERSION = "4"
 CANONICAL_PROMOTION_CONFIDENCE = Decimal("0.90")
 
 
@@ -37,11 +37,36 @@ def _first_match(patterns: list[str], text: str):
     return min(matches, default=(None, None, None))[2]
 
 
+_SUMMARY_LABEL = re.compile(
+    r"(?:common\s+stock\s+offered\s+by\s+(?:us|the\s+selling\s+stockholders)|"
+    r"common\s+stock\s+outstanding\s+immediately\s+after\s+giving\s+effect\s+to\s+this\s+offering|"
+    r"common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering|"
+    r"class\s+[A-Za-z0-9]+\s+common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering|"
+    r"total\s+class\s+[A-Za-z0-9]+(?:\s+and\s+class\s+[A-Za-z0-9]+)+\s+common\s+stock\s+"
+    r"to\s+be\s+outstanding\s+after\s+this\s+offering)", re.I)
+
+
+def _offering_summary_contexts(text: str) -> list[str]:
+    """Find strong summary labels globally, then expose only nearby text."""
+    labels = list(_SUMMARY_LABEL.finditer(text))
+    contexts = []
+    for index, label in enumerate(labels):
+        # A value normally immediately follows its label. The cap also leaves
+        # room for a parenthetical option count without exposing the rest of
+        # the prospectus to offering-field patterns.
+        end = min(len(text), label.end() + 600)
+        if index + 1 < len(labels):
+            end = min(end, labels[index + 1].start())
+        contexts.append(text[label.start():end])
+    return contexts
+
+
 def extract_ipo_facts(text: str) -> list[ParsedFact]:
     """Extract explicit base-offering language; optional share counts are ignored."""
     # Offering summaries can follow the literal cover, but this remains tightly
     # bounded so option-plan and historical-financing disclosures are excluded.
     cover = text[:20000]
+    summary_contexts = _offering_summary_contexts(text)
     facts: list[ParsedFact] = []
 
     price_patterns = [
@@ -80,6 +105,27 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
     primary = _first_match(primary_patterns, cover)
     secondary = _first_match(secondary_patterns, cover)
 
+    summary_primary_pattern = (
+        r"common\s+stock\s+offered\s+by\s+us\s*[:\-]?\s*(None\.?|[\d,]+\s+shares)")
+    summary_secondary_pattern = (
+        r"common\s+stock\s+offered\s+by\s+the\s+selling\s+stockholders\s*[:\-]?\s*"
+        r"(None\.?|[\d,]+\s+shares)")
+    if primary is None:
+        primary = next((match for context in summary_contexts
+                        if (match := re.search(summary_primary_pattern, context, re.I))), None)
+    if secondary is None:
+        secondary = next((match for context in summary_contexts
+                          if (match := re.search(summary_secondary_pattern, context, re.I))), None)
+
+    pure_secondary = re.search(
+        r"all\s+of\s+the\s+([\d,]+)\s+shares\s+of\s+common\s+stock\s+are\s+being\s+sold\s+by\s+"
+        r"(?:the\s+)?selling\s+(?:stockholders|shareholders)", cover, re.I)
+    # Unlike ordinary selling-holder language, "all of the N shares" explicitly
+    # establishes both that the issuer component is zero and that N is the base
+    # offering total.
+    if pure_secondary:
+        primary = None
+
     def component_fact(field, match):
         raw = match.group(1)
         if raw.lower().startswith("none"):
@@ -88,7 +134,10 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
         numeric = re.search(r"[\d,]+", raw).group(0)
         return _fact(field, match, 1, "shares", "0.98", value=_number(numeric))
 
-    if primary:
+    if pure_secondary:
+        facts.append(_fact("primary_shares", pure_secondary, 1, "shares", "0.99",
+                           value="0"))
+    elif primary:
         facts.append(component_fact("primary_shares", primary))
     if secondary:
         facts.append(component_fact("secondary_shares", secondary))
@@ -118,23 +167,34 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
     elif not total_matches and secondary and primary_value is None:
         # The pure-secondary "all of the N shares" construction explicitly gives
         # the total. Other isolated secondary component wording does not.
-        if re.match(r"all\s+of\s+the", secondary.group(0), re.I):
+        if pure_secondary:
             facts.append(ParsedFact("shares_offered", secondary_value, "shares", Decimal("0.98"),
                                     re.sub(r"\s+", " ", secondary.group(0))[:500],
                                     "Prospectus cover", False, None))
 
     # Prefer an explicit aggregate across classes. If none exists, accept only a
     # non-class-specific post-offering label; never sum class counts ourselves.
-    post_total = re.search(
+    post_total_pattern = (
         r"total\s+class\s+[A-Za-z0-9]+(?:\s+and\s+class\s+[A-Za-z0-9]+)+\s+common\s+stock\s+"
-        r"to\s+be\s+outstanding\s+after\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares", cover, re.I)
+        r"to\s+be\s+outstanding\s+after\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares")
     post_patterns = [
         r"(?:shares\s+of\s+)?common\s+stock\s+outstanding\s+immediately\s+after\s+giving\s+effect\s+to\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
         r"(?:shares\s+of\s+)?common\s+stock\s+(?:to\s+be\s+)?outstanding\s+immediately\s+(?:after|following)\s+(?:this|the)\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
         r"common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering\s*[:\-]?\s*([\d,]+)\s+shares",
         r"([\d,]+)\s+shares\s+of\s+(?:our\s+)?(?:common stock|ordinary shares)\s+will\s+be\s+outstanding\s+immediately\s+(?:after|following)\s+(?:this|the)\s+offering",
     ]
-    post = post_total or _first_match(post_patterns, cover)
+    class_post_pattern = (
+        r"class\s+[A-Za-z0-9]+\s+common\s+stock\s+to\s+be\s+outstanding\s+after\s+this\s+offering"
+        r"\s*[:\-]?\s*([\d,]+)\s+shares")
+    post_total = next((match for context in summary_contexts
+                       if (match := re.search(post_total_pattern, context, re.I))), None)
+    post = post_total
+    if post is None:
+        post = next((_first_match(post_patterns, context) for context in summary_contexts
+                     if _first_match(post_patterns, context)), None)
+    if post is None:
+        post = next((match for context in summary_contexts
+                     if (match := re.search(class_post_pattern, context, re.I))), None)
     if post:
         facts.append(_fact("shares_outstanding_post_ipo", post, 1, "shares", "0.98", "Offering summary"))
     return facts

@@ -54,21 +54,26 @@ def test_conflicting_explicit_prices_are_retained_for_ambiguity_handling():
 
 
 def test_parser_version_reflects_corrected_offering_semantics():
-    assert PARSER_VERSION == "3"
+    assert PARSER_VERSION == "4"
 
 
 def test_beta_security_description_table_and_dual_class_total():
-    facts = extract_ipo_facts(Path("tests/fixtures/beta_final_prospectus.txt").read_text())
+    text = Path("tests/fixtures/beta_final_prospectus.txt").read_text()
+    assert text.index("Total Class A and Class B") > 20000
+    facts = extract_ipo_facts(text)
     assert set(_values(facts, "ipo_price")) == {Decimal("34.00")}
     assert _values(facts, "primary_shares") == [Decimal("29852941")]
     assert _values(facts, "shares_offered") == [Decimal("29852941")]
     assert _values(facts, "shares_outstanding_post_ipo") == [Decimal("223807603")]
-    assert Decimal("219784060") not in _values(facts, "shares_outstanding_post_ipo")
+    assert Decimal("215306119") not in _values(facts, "shares_outstanding_post_ipo")
+    assert Decimal("228285544") not in _values(facts, "shares_outstanding_post_ipo")
     assert _values(facts, "secondary_shares") == []
 
 
 def test_pxed_pure_secondary_explicit_zero_and_base_counts():
-    facts = extract_ipo_facts(Path("tests/fixtures/pxed_final_prospectus.txt").read_text())
+    text = Path("tests/fixtures/pxed_final_prospectus.txt").read_text()
+    assert text.index("Common stock offered by us") > 20000
+    facts = extract_ipo_facts(text)
     assert set(_values(facts, "ipo_price")) == {Decimal("32.00")}
     assert _values(facts, "primary_shares") == [Decimal("0")]
     assert _values(facts, "secondary_shares") == [Decimal("4250000")]
@@ -98,3 +103,14 @@ def test_single_class_post_offering_and_unrelated_outstanding_are_distinguished(
     100,000,000 shares
     (or 101,000,000 if the underwriters exercise their option)."""
     assert _values(extract_ipo_facts(text), "shares_outstanding_post_ipo") == [Decimal("100000000")]
+
+
+def test_late_generic_outstanding_language_is_not_a_summary_context():
+    text = "Cover text.\n" + "x" * 21000 + "\nThere were 91,234,567 shares outstanding at year end."
+    assert _values(extract_ipo_facts(text), "shares_outstanding_post_ipo") == []
+
+
+def test_ordinary_secondary_wording_does_not_imply_primary_zero():
+    facts = extract_ipo_facts("Selling stockholders are offering 4,250,000 shares.")
+    assert _values(facts, "secondary_shares") == [Decimal("4250000")]
+    assert _values(facts, "primary_shares") == []
