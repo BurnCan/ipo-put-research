@@ -53,6 +53,10 @@ def initialize_primary_security(db: Session, company: Company) -> tuple[Security
 
 def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: int | None = None,
                           ipo_id: int | None = None, ticker: str | None = None, sleep_seconds: float = 0,
+                          classification_status: str | None = None,
+                          candidate_type: str | None = None,
+                          offering_status: str | None = None,
+                          primary_lockup_only: bool = False,
                           refresh: bool = False, refresh_days: int | None = None,
                           initial_lookback_days: int | None = None,
                           end_date: date | None = None) -> MarketIngestReport:
@@ -64,6 +68,17 @@ def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: i
         stmt = stmt.where(IPO.id == ipo_id)
     if ticker:
         stmt = stmt.where(func.upper(Company.ticker) == ticker.strip().upper())
+    if classification_status is not None:
+        stmt = stmt.where(IPO.classification_status == classification_status)
+    if candidate_type is not None:
+        stmt = stmt.where(IPO.candidate_type == candidate_type)
+    if offering_status is not None:
+        stmt = stmt.where(IPO.offering_status == offering_status)
+    if primary_lockup_only:
+        stmt = stmt.where(
+            IPO.primary_lockup_id.is_not(None),
+            IPO.primary_lockup_expiration_date.is_not(None),
+        )
     if limit:
         stmt = stmt.limit(limit)
     rows = db.execute(stmt).all()

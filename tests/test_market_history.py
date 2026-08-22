@@ -33,6 +33,23 @@ def add_ipo(db, *, ipo_date=date(2025, 1, 2), filing_date=date(2020, 1, 1), pric
     return ipo
 
 
+def add_filter_ipo(db, number, *, ticker=None, classification_status="unclassified",
+                   candidate_type="unknown", offering_status="filed", primary_lockup_id=None,
+                   primary_lockup_expiration_date=None, filing_date=None):
+    company = Company(cik=f"{number:010d}", name=f"Market Co {number}",
+                      ticker=ticker if ticker is not None else f"M{number}", exchange="NYSE")
+    ipo = IPO(
+        company=company, ipo_date=date(2025, 1, 2),
+        first_filing_date=filing_date or date(2020, 1, number), ipo_price=Decimal("10"),
+        classification_status=classification_status, candidate_type=candidate_type,
+        offering_status=offering_status, primary_lockup_id=primary_lockup_id,
+        primary_lockup_expiration_date=primary_lockup_expiration_date,
+    )
+    db.add(ipo)
+    db.commit()
+    return ipo
+
+
 class Provider:
     name = "fake"
 
@@ -103,6 +120,94 @@ def test_ingest_initializes_security_creates_bars_and_is_idempotent():
         assert db.scalar(select(func.count()).select_from(DailyPrice)) == 1
         assert ipo.ipo_date == date(2025, 1, 2)
         assert ipo.market_summary.first_trade_date == date(2025, 1, 3)
+
+
+@pytest.mark.parametrize(("argument", "value"), [
+    ("classification_status", "classified"),
+    ("candidate_type", "operating_company_ipo"),
+    ("offering_status", "priced"),
+])
+def test_research_universe_value_filters(argument, value):
+    provider = Provider([])
+    with Session(database()) as db:
+        matching = add_filter_ipo(db, 1, **{argument: value})
+        add_filter_ipo(db, 2)
+
+        report = ingest_market_history(
+            db, provider, end_date=date(2025, 1, 3), **{argument: value}
+        )
+
+        assert report.securities_seen == 1
+        assert provider.calls[0][0] == matching.company.ticker
+
+
+def test_primary_lockup_filter_requires_selected_and_dated_lockup():
+    provider = Provider([])
+    with Session(database()) as db:
+        add_filter_ipo(db, 1)
+        add_filter_ipo(db, 2, primary_lockup_id=102)
+        included = add_filter_ipo(
+            db, 3, primary_lockup_id=103,
+            primary_lockup_expiration_date=date(2025, 7, 1),
+        )
+
+        report = ingest_market_history(
+            db, provider, primary_lockup_only=True, end_date=date(2025, 1, 3)
+        )
+
+        assert report.securities_seen == 1
+        assert [call[0] for call in provider.calls] == [included.company.ticker]
+
+
+def test_research_filters_compose_and_apply_before_limit():
+    provider = Provider([])
+    filters = dict(classification_status="classified", candidate_type="operating_company_ipo",
+                   offering_status="priced", primary_lockup_only=True)
+    with Session(database()) as db:
+        # These sort ahead of the eligible row in the broad query. Applying the
+        # limit first would therefore produce no eligible result.
+        add_filter_ipo(db, 1, offering_status="priced", filing_date=date(2024, 1, 1))
+        add_filter_ipo(db, 2, classification_status="classified", offering_status="priced",
+                       filing_date=date(2023, 1, 1))
+        eligible = add_filter_ipo(
+            db, 3, classification_status="classified", candidate_type="operating_company_ipo",
+            offering_status="priced", primary_lockup_id=103,
+            primary_lockup_expiration_date=date(2025, 7, 1), filing_date=date(2020, 1, 1),
+        )
+
+        report = ingest_market_history(
+            db, provider, limit=1, end_date=date(2025, 1, 3), **filters
+        )
+
+        assert report.securities_seen == 1
+        assert [call[0] for call in provider.calls] == [eligible.company.ticker]
+
+
+def test_existing_selection_modes_and_unfiltered_missing_ticker_behavior():
+    with Session(database()) as db:
+        first = add_filter_ipo(db, 1, ticker="ONE")
+        second = add_filter_ipo(db, 2, ticker="TWO")
+        add_filter_ipo(db, 3, ticker="")
+
+        ticker_provider = Provider([])
+        ticker_report = ingest_market_history(
+            db, ticker_provider, ticker="one", end_date=date(2025, 1, 3)
+        )
+        id_provider = Provider([])
+        id_report = ingest_market_history(
+            db, id_provider, ipo_id=second.id, end_date=date(2025, 1, 3)
+        )
+        unfiltered_provider = Provider([])
+        unfiltered_report = ingest_market_history(
+            db, unfiltered_provider, end_date=date(2025, 1, 3)
+        )
+
+        assert ticker_report.securities_seen == 1
+        assert ticker_provider.calls[0][0] == first.company.ticker
+        assert id_report.securities_seen == 1
+        assert id_provider.calls[0][0] == second.company.ticker
+        assert unfiltered_report.securities_seen == 3
+        assert unfiltered_report.symbols_missing == 1
 
 
 def test_no_fetch_rerun_recomputes_summary_after_ipo_price_change():
