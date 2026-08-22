@@ -317,6 +317,35 @@ python scripts/ingest_market_history.py --ticker ALH --refresh --sleep 12
 python scripts/ingest_market_history.py --ticker ALH --refresh --refresh-days 90
 ```
 
+After processing final prospectuses and extracting primary lockups, restrict provider requests to
+the lockup research cohort with:
+
+```bash
+python scripts/ingest_market_history.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only
+```
+
+`--primary-lockup-only` requires both a selected `primary_lockup_id` and a
+`primary_lockup_expiration_date`; arbitrary lockup rows alone do not qualify. All cohort filters are
+composable and are applied before `--limit`. For a staged provider batch, run:
+
+```bash
+python scripts/ingest_market_history.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only \
+  --limit 25
+```
+
+The operational sequence remains intentionally manual: process final prospectuses, extract primary
+lockups, ingest market history with `--primary-lockup-only`, and then analyze lockup events. Keep the
+real Massive API key only in `.env`; the setup remains `MARKET_DATA_PROVIDER=massive` and
+`MASSIVE_API_KEY=...`.
+
 ### Market summary metrics
 
 `ipo_market_summary` is a rerunnable derived cache, not raw evidence. It records the earliest bar's

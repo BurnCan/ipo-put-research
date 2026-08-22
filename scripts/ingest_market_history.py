@@ -15,6 +15,13 @@ def main() -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--ipo-id", type=int)
     parser.add_argument("--ticker")
+    parser.add_argument("--classification-status")
+    parser.add_argument("--candidate-type")
+    parser.add_argument("--offering-status")
+    parser.add_argument(
+        "--primary-lockup-only", action="store_true",
+        help="Only ingest IPOs with a selected primary lockup and expiration date",
+    )
     parser.add_argument("--sleep", type=float, default=12.0, help="Seconds between provider requests")
     parser.add_argument(
         "--refresh", action="store_true",
@@ -29,7 +36,11 @@ def main() -> None:
     with SessionLocal() as db:
         report = ingest_market_history(db, provider, limit=args.limit, ipo_id=args.ipo_id,
                                        ticker=args.ticker, sleep_seconds=args.sleep, refresh=args.refresh,
-                                       refresh_days=args.refresh_days)
+                                       refresh_days=args.refresh_days,
+                                       classification_status=args.classification_status,
+                                       candidate_type=args.candidate_type,
+                                       offering_status=args.offering_status,
+                                       primary_lockup_only=args.primary_lockup_only)
     print(report.to_dict())
 
 
