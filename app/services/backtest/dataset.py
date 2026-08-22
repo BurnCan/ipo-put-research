@@ -10,7 +10,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models import Company, IPO, IPOLockup, LockupEventAnalysis, LockupSignalSnapshot
 from app.services.event_analysis.constants import OUTCOME_VERSION, SNAPSHOT_VERSION
@@ -53,6 +53,32 @@ def build_backtest_dataset(db, *, classification_status="classified",
                            candidate_type="operating_company_ipo", offering_status="priced",
                            primary_lockup_only=True, ticker=None, ipo_id=None, limit=None):
     """Return deterministic normalized dictionaries; filters are applied before limit."""
+    cohort = (select(LockupSignalSnapshot.lockup_id)
+              .join(IPO, IPO.id == LockupSignalSnapshot.ipo_id)
+              .join(Company, Company.id == IPO.company_id)
+              .join(IPOLockup, IPOLockup.id == LockupSignalSnapshot.lockup_id)
+              .where(LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION))
+    predicates = []
+    if primary_lockup_only:
+        predicates.extend((LockupSignalSnapshot.lockup_id == IPO.primary_lockup_id,
+                           IPO.primary_lockup_id.is_not(None),
+                           IPO.primary_lockup_expiration_date.is_not(None)))
+    if classification_status is not None: predicates.append(IPO.classification_status == classification_status)
+    if candidate_type is not None: predicates.append(IPO.candidate_type == candidate_type)
+    if offering_status is not None: predicates.append(IPO.offering_status == offering_status)
+    if ticker: predicates.append(Company.ticker.ilike(ticker.strip()))
+    if ipo_id is not None: predicates.append(IPO.id == ipo_id)
+
+    # LIMIT applies to independent events, not to the repeated-measure rows
+    # produced for their observation offsets.  Grouping also makes selection
+    # independent of how many snapshots happen to be available for an event.
+    cohort = (cohort.where(*predicates)
+              .group_by(LockupSignalSnapshot.lockup_id, IPO.id)
+              .order_by(func.min(LockupSignalSnapshot.event_date), IPO.id,
+                        LockupSignalSnapshot.lockup_id))
+    if limit is not None:
+        cohort = cohort.limit(limit)
+
     stmt = (select(LockupSignalSnapshot, LockupEventAnalysis, IPO, Company)
             .join(IPO, IPO.id == LockupSignalSnapshot.ipo_id)
             .join(Company, Company.id == IPO.company_id)
@@ -61,20 +87,10 @@ def build_backtest_dataset(db, *, classification_status="classified",
                        (LockupEventAnalysis.lockup_id == LockupSignalSnapshot.lockup_id) &
                        (LockupEventAnalysis.security_id == LockupSignalSnapshot.security_id) &
                        (LockupEventAnalysis.outcome_version == OUTCOME_VERSION))
-            .where(LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION))
-    if primary_lockup_only:
-        stmt = stmt.where(LockupSignalSnapshot.lockup_id == IPO.primary_lockup_id,
-                          IPO.primary_lockup_id.is_not(None),
-                          IPO.primary_lockup_expiration_date.is_not(None))
-    if classification_status is not None: stmt = stmt.where(IPO.classification_status == classification_status)
-    if candidate_type is not None: stmt = stmt.where(IPO.candidate_type == candidate_type)
-    if offering_status is not None: stmt = stmt.where(IPO.offering_status == offering_status)
-    if ticker: stmt = stmt.where(Company.ticker.ilike(ticker.strip()))
-    if ipo_id is not None: stmt = stmt.where(IPO.id == ipo_id)
+            .where(LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION,
+                   LockupSignalSnapshot.lockup_id.in_(cohort)))
     stmt = stmt.order_by(LockupSignalSnapshot.event_date, IPO.id,
                          LockupSignalSnapshot.observation_offset, LockupSignalSnapshot.security_id)
-    if limit is not None: stmt = stmt.limit(limit)
-
     result, seen = [], set()
     for snapshot, outcome, ipo, company in db.execute(stmt):
         key = (snapshot.lockup_id, snapshot.observation_offset)
