@@ -12,19 +12,19 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 - Uses CIK and filing accession numbers for deduplication.
 - Supports idempotent ingestion: rerunning the same date range does not duplicate existing rows.
 - Conservatively classifies candidates from stored SEC filing chronology and associates a plausible final `424B4`.
-- Caches associated final prospectuses and extracts conservative offering facts with provenance.
+- Caches associated final prospectuses and extracts conservative offering facts and agreement-level lockups with provenance.
 
 > **Prototype status:** classifications are heuristic research labels based only on SEC filing metadata, not authoritative legal determinations. Registration statements can represent many transaction types, so uncertain or contradictory cases intentionally remain `unknown` / `needs_review`.
 
 ## Research pipeline
 
 ```text
-SEC master.idx → IPO candidate discovery → SEC submissions enrichment
-  → candidate classification → final prospectus association → prospectus cache
-  → deterministic offering extraction → fact provenance → canonical IPO fields
+SEC candidate discovery → SEC submissions enrichment → candidate classification
+  → final prospectus association → prospectus cache → offering fact extraction
+  → lockup agreement extraction → primary lockup signal
 ```
 
-Milestone 3 implements this displayed pipeline. Market, options, scoring, and trading stages remain out of scope.
+Milestone 4 implements the lockup/supply-catalyst portion of this pipeline. Market, options, scoring, and trading stages remain out of scope.
 
 ## Recommended environment
 
@@ -209,16 +209,16 @@ python scripts/enrich_sec_submissions.py --limit 25
 
 ### Upgrade an existing database
 
-`create_all()` cannot add columns to an existing table. After pulling Milestone 2, preserve the
+`create_all()` cannot add columns to an existing table. After pulling a new milestone, preserve the
 existing data and apply the narrowly scoped, idempotent upgrade (it is safe to rerun):
 
 ```bash
 python scripts/upgrade_schema.py
 ```
 
-It adds the five classification/prospectus columns and the PostgreSQL prospectus foreign-key
-index; it does not delete or rewrite candidate data. Fresh databases receive the same schema from
-SQLAlchemy metadata.
+It adds missing classification/offering/lockup columns, provenance tables, foreign keys, and indexes;
+it does not delete or rewrite candidate data and is safe to run repeatedly. Fresh databases receive
+the same schema from SQLAlchemy metadata.
 
 ### Classify candidates
 
@@ -338,6 +338,75 @@ http://localhost:8007/docs
 IPO list/detail responses include classification and canonical offering fields, a `final_prospectus`
 object, cache metadata, and fact counts. Detail responses add compact provenance facts.
 
+## Lockup extraction (Milestone 4)
+
+### What lockup extraction does
+
+The deterministic parser reuses the normalized `text.txt` in the Milestone 3 cache; it never starts
+a second download path. It first discovers bounded `UNDERWRITING`, `SHARES ELIGIBLE FOR (FUTURE)
+SALE`, `LOCK-UP AGREEMENTS/ARRANGEMENTS`, and `RESTRICTIONS ON SALE` regions, then looks for sale
+restriction concepts inside those regions. An unrelated day count elsewhere in a prospectus is not
+considered. Each match becomes an agreement-level `ipo_lockups` row with its source excerpt and
+locator, filing, parser name/version, and confidence.
+
+An IPO may have multiple rows because company issuance restrictions, shareholder restrictions,
+market-standoff terms, or distinct holder groups can coexist. Controlled lockup types are
+`underwriter_lockup`, `company_lockup`, `market_standoff`, `contractual_restriction`, `other`, and
+`unknown`; controlled holders are `directors_officers`, `existing_stockholders`,
+`selling_stockholders`, `company`, `employees`, `pre_ipo_investors`, `sponsor`, `other`, and
+`unknown`. The original holder wording is retained rather than replaced by the label.
+
+Confidence has one interpretation: 0.95–1.00 is very high, 0.90–0.949 high, 0.75–0.899 plausible,
+and below 0.75 weak/informational. Exact evidence identity includes the IPO and filing, agreement
+attributes, parser identity/version, excerpt, and locator. Consequently exact reruns are idempotent
+while two agreements with the same duration but distinct holder or source provenance survive.
+
+### Primary lockup
+
+`primary_lockup_expiration_date` means **the highest-confidence estimated expiration date of the
+principal underwriter-style lockup affecting existing shareholders or comparable pre-IPO holders**.
+It is a research convenience signal, not a legal determination. Promotion requires a high-confidence,
+dated underwriter lockup for a principal holder group. Company-only restrictions, employee market
+standoffs, undated or weak matches are excluded. Compatible evidence with one date may be promoted;
+materially conflicting dates clear both `primary_lockup_id` and the canonical date, including a stale
+selection from an earlier run.
+
+### Explicit versus calculated dates
+
+`stated_expiration_date` records a calendar date actually stated by the prospectus and is not
+recalculated. `calculated_expiration_date` is populated only when a reliable duration is explicitly
+anchored to the date of the prospectus and the filing date is known. The convention is ordinary
+calendar arithmetic, `prospectus_date + timedelta(days=duration_days)`, without exchange-calendar or
+business-day adjustment. Unclear anchors produce no calculated date. An exact “six months” can be
+represented conservatively as 180 days; “approximately six months” is rejected.
+
+### Early release and locked shares
+
+Waiver, partial/staggered release, early-release, and blackout-adjustment language is flagged and a
+concise source fragment is preserved. Complex conditional release dates are not predicted. Shares are
+captured only when grammar ties a count directly to the lockup. A percentage may be derived only when
+both that count and the canonical post-offering shares outstanding are available, and derived values
+are marked as such.
+
+Apply the schema upgrade and parse the existing cache:
+
+```bash
+python scripts/upgrade_schema.py
+python scripts/extract_lockups.py
+python scripts/extract_lockups.py --limit 25
+python scripts/extract_lockups.py --ipo-id 123 --reparse
+```
+
+`--reparse` runs current parser logic again but its evidence key preserves exact-rerun idempotency.
+IPOs without a successful normalized cached document are skipped and reported; this command does not
+fetch them.
+
+### Milestone 4 limitations
+
+This layer does not model actual exchange trading-day adjustments, every legal exception,
+underwriter discretionary waiver outcomes, future unlock-event probabilities, supply-shock scoring,
+or put-trade timing. It also does not use an LLM or OCR and does not make trading recommendations.
+
 ## Testing
 
 Tests use in-memory SQLite and do not call live SEC endpoints:
@@ -441,7 +510,9 @@ scripts/
   ingest_recent_ipos.py Command-line ingest entry point
   enrich_sec_submissions.py SEC metadata enrichment
   classify_ipo_candidates.py Offline candidate classification
-  upgrade_schema.py      Idempotent Milestone 2 schema upgrade
+  process_final_prospectuses.py Cache and parse final prospectuses
+  extract_lockups.py      Parse cached text into agreement-level lockups
+  upgrade_schema.py      Idempotent schema upgrades through Milestone 4
 tests/
 requirements.txt
 requirements-dev.txt

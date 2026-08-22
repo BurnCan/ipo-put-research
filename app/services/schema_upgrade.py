@@ -47,4 +47,26 @@ def upgrade_milestone_3(engine: Engine) -> list[str]:
 
 
 def upgrade_schema(engine: Engine) -> list[str]:
-    return upgrade_milestone_2(engine) + upgrade_milestone_3(engine)
+    return upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine)
+
+
+def upgrade_milestone_4(engine: Engine) -> list[str]:
+    """Create agreement provenance and add nullable canonical pointers safely."""
+    from app.models import IPOLockup
+    changed: list[str] = []
+    if "ipo_lockups" not in set(inspect(engine).get_table_names()):
+        IPOLockup.__table__.create(engine, checkfirst=True)
+        changed.append("ipo_lockups")
+    existing = {column["name"] for column in inspect(engine).get_columns("ipos")}
+    definitions = {
+        "primary_lockup_id": "INTEGER NULL REFERENCES ipo_lockups(id) ON DELETE SET NULL",
+        "primary_lockup_expiration_date": "DATE NULL",
+    }
+    with engine.begin() as connection:
+        for name, definition in definitions.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE ipos ADD COLUMN {name} {definition}"))
+                changed.append(name)
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_ipos_primary_lockup_id ON ipos (primary_lockup_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_ipos_primary_lockup_expiration_date ON ipos (primary_lockup_expiration_date)"))
+    return changed
