@@ -17,6 +17,14 @@ def main():
     parser.add_argument("--ipo-id", type=int)
     parser.add_argument("--lockup-id", type=int)
     parser.add_argument("--ticker")
+    parser.add_argument("--classification-status")
+    parser.add_argument("--candidate-type")
+    parser.add_argument("--offering-status")
+    parser.add_argument(
+        "--primary-lockup-only",
+        action="store_true",
+        help="Require a selected primary lockup and stored primary expiration date",
+    )
     parser.add_argument("--recompute", action="store_true")
     args = parser.parse_args()
     with SessionLocal() as db:
