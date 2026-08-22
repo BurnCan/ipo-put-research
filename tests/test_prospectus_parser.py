@@ -54,4 +54,47 @@ def test_conflicting_explicit_prices_are_retained_for_ambiguity_handling():
 
 
 def test_parser_version_reflects_corrected_offering_semantics():
-    assert PARSER_VERSION == "2"
+    assert PARSER_VERSION == "3"
+
+
+def test_beta_security_description_table_and_dual_class_total():
+    facts = extract_ipo_facts(Path("tests/fixtures/beta_final_prospectus.txt").read_text())
+    assert set(_values(facts, "ipo_price")) == {Decimal("34.00")}
+    assert _values(facts, "primary_shares") == [Decimal("29852941")]
+    assert _values(facts, "shares_offered") == [Decimal("29852941")]
+    assert _values(facts, "shares_outstanding_post_ipo") == [Decimal("223807603")]
+    assert Decimal("219784060") not in _values(facts, "shares_outstanding_post_ipo")
+    assert _values(facts, "secondary_shares") == []
+
+
+def test_pxed_pure_secondary_explicit_zero_and_base_counts():
+    facts = extract_ipo_facts(Path("tests/fixtures/pxed_final_prospectus.txt").read_text())
+    assert set(_values(facts, "ipo_price")) == {Decimal("32.00")}
+    assert _values(facts, "primary_shares") == [Decimal("0")]
+    assert _values(facts, "secondary_shares") == [Decimal("4250000")]
+    assert _values(facts, "shares_offered") == [Decimal("4250000")]
+    assert _values(facts, "shares_outstanding_post_ipo") == [Decimal("35596255")]
+    assert Decimal("4887500") not in _values(facts, "shares_offered")
+
+
+def test_explicit_zero_is_distinct_from_unknown_component():
+    explicit = extract_ipo_facts("Common stock offered by us\nNone.")
+    unknown = extract_ipo_facts("This prospectus does not state issuer share allocation here.")
+    assert _values(explicit, "primary_shares") == [Decimal("0")]
+    assert _values(unknown, "primary_shares") == []
+
+
+def test_pricing_table_uses_first_amount_not_total_and_is_cover_bounded():
+    facts = extract_ipo_facts("Public offering price\n$32.00\n$136,000,000")
+    assert _values(facts, "ipo_price") == [Decimal("32.00")]
+    assert Decimal("136000000") not in _values(facts, "ipo_price")
+    late = "x" * 20001 + "\nPublic offering price\n$15.00\n$150,000,000"
+    assert _values(extract_ipo_facts(late), "ipo_price") == []
+
+
+def test_single_class_post_offering_and_unrelated_outstanding_are_distinguished():
+    text = """Options to purchase 8,000,000 shares were outstanding.
+    Common stock to be outstanding after this offering
+    100,000,000 shares
+    (or 101,000,000 if the underwriters exercise their option)."""
+    assert _values(extract_ipo_facts(text), "shares_outstanding_post_ipo") == [Decimal("100000000")]

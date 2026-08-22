@@ -77,7 +77,7 @@ def test_deal_size_is_cleared_when_a_canonical_input_becomes_ambiguous():
         assert ipo.deal_size is None
 
 
-def test_v1_facts_coexist_but_v2_semantics_drive_reparse_promotion():
+def test_v1_and_v2_facts_coexist_but_v3_semantics_drive_reparse_promotion():
     with Session(_database()) as db:
         ipo, filing = _ipo_with_prospectus(db)
         db.add(IPOFact(
@@ -85,6 +85,13 @@ def test_v1_facts_coexist_but_v2_semantics_drive_reparse_promotion():
             value_numeric=Decimal("24390243"), value_key="old-v1", unit="shares",
             confidence=Decimal("0.94"), parser_name="final_prospectus_offering",
             parser_version="1", source_excerpt="We are offering 24,390,243 shares",
+            source_locator="Prospectus cover", is_derived=True,
+            derivation="primary_shares (no selling shares stated)"))
+        db.add(IPOFact(
+            ipo_id=ipo.id, filing_id=filing.id, field_name="shares_offered",
+            value_numeric=Decimal("24390243"), value_key="old-v2", unit="shares",
+            confidence=Decimal("0.94"), parser_name="final_prospectus_offering",
+            parser_version="2", source_excerpt="Prior parser interpretation",
             source_locator="Prospectus cover", is_derived=True,
             derivation="primary_shares (no selling shares stated)"))
         store_facts(db, ipo, filing.id, [
@@ -106,3 +113,28 @@ def test_v1_facts_coexist_but_v2_semantics_drive_reparse_promotion():
         assert result["ambiguities"] == 0
         assert db.scalar(select(func.count()).select_from(IPOFact).where(
             IPOFact.parser_version == "1")) == 1
+        assert db.scalar(select(func.count()).select_from(IPOFact).where(
+            IPOFact.parser_version == "2")) == 1
+
+
+def test_beta_and_pxed_new_inputs_drive_expected_deal_sizes():
+    with Session(_database()) as db:
+        ipo, filing = _ipo_with_prospectus(db)
+        store_facts(db, ipo, filing.id, [
+            _fact("ipo_price", "34", "Final IPO price is $34"),
+            _fact("shares_offered", "29852941", "We are offering 29,852,941 shares"),
+        ])
+        promote_canonical_facts(db, ipo)
+        assert ipo.deal_size == Decimal("1014999994")
+
+    with Session(_database()) as db:
+        ipo, filing = _ipo_with_prospectus(db)
+        store_facts(db, ipo, filing.id, [
+            _fact("ipo_price", "32", "Final IPO price is $32"),
+            _fact("primary_shares", "0", "Common stock offered by us: None"),
+            _fact("secondary_shares", "4250000", "Selling holders: 4,250,000 shares"),
+            _fact("shares_offered", "4250000", "All 4,250,000 shares are being sold"),
+        ])
+        promote_canonical_facts(db, ipo)
+        assert ipo.primary_shares == Decimal("0")
+        assert ipo.deal_size == Decimal("136000000")

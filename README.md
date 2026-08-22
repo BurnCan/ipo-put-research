@@ -445,6 +445,17 @@ python scripts/process_final_prospectuses.py --ipo-id 123 --reparse
 python scripts/process_final_prospectuses.py --ipo-id 123 --refetch --reparse
 ```
 
+Bulk processing can be restricted to the confidently classified research universe. Filters are
+composable and are applied **before** `--limit`:
+
+```bash
+python scripts/process_final_prospectuses.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --limit 25
+```
+
 The upgrade adds `primary_shares`, `secondary_shares`, and `shares_outstanding_post_ipo`, plus the
 `filing_documents` and `ipo_facts` tables; it preserves existing rows and is safe to rerun. The default
 processor reuses successful downloads and facts. `--reparse` reruns the current parser against cached
@@ -471,10 +482,21 @@ The single canonical promotion threshold is **0.90**. Facts below it remain avai
 canonical IPO data. Only current-version facts from `final_prospectus_filing_id` qualify; prior-version
 facts remain as provenance but do not override corrected parser semantics. Distinct high-confidence values
 for the same field are reported as ambiguous and clear the canonical field rather than retaining stale data. Unchanged values
-are not rewritten. `primary_shares` means shares sold by the issuer/company, while
-`secondary_shares` means shares sold by existing/selling stockholders. `shares_offered` is the total base
-offering sold to the public: `primary_shares + secondary_shares` when both are explicitly present.
-Optional underwriter over-allotment/greenshoe shares are not included yet.
+are not rewritten.
+
+Offering-field semantics are:
+
+- `primary_shares`: issuer/company shares sold in the base offering.
+- `secondary_shares`: existing/selling-stockholder shares sold in the base offering.
+- `shares_offered`: total base offering shares, excluding optional underwriter over-allotment shares.
+- `shares_outstanding_post_ipo`: base post-offering shares outstanding; for a multi-class issuer an
+  explicit total across classes takes precedence over class-specific counts.
+- `deal_size`: `ipo_price * shares_offered`.
+
+For the primary and secondary components, **`0` means the prospectus explicitly states none**, while
+**`NULL` means unknown/not extracted**. The parser does not infer zero merely because it did not find one
+side. Optional underwriter over-allotment/greenshoe shares are excluded from base offering shares,
+post-offering shares outstanding, and deal size.
 
 When canonical price and offered shares exist, `deal_size` is recorded as a derived fact
 (`ipo_price * shares_offered`) using the lower input confidence. It therefore represents total base
@@ -482,10 +504,12 @@ offering value, not issuer net proceeds.
 
 ### Parsed fields and limitations
 
-Parser `final_prospectus_offering` version `2` attempts only `ipo_price`, `shares_offered`,
+Parser `final_prospectus_offering` version `3` attempts only `ipo_price`, `shares_offered`,
 `primary_shares`, `secondary_shares`, `shares_outstanding_post_ipo`, and derived `deal_size`. It prioritizes
 explicit cover/summary language and avoids authorized, option-plan, over-allotment, historical-financing,
-pre-offering, fully diluted, option, and warrant counts. Ambiguous language is intentionally unpromoted.
+pre-offering, fully diluted, option, and warrant counts. It recognizes bounded final-price sentences and
+simple cover pricing tables, explicit issuer/selling-holder allocations (including `None`), and common
+post-offering outstanding labels. Ambiguous language is intentionally unpromoted.
 
 This milestone does not parse lockups, underwriters, financial statements, use of proceeds, market data,
 or options, and does not reconstruct complex tables or perform OCR.
