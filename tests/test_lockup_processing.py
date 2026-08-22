@@ -8,9 +8,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db
 from app.main import app
-from app.models import Company, Filing, IPO, IPOLockup
+from app.models import Company, Filing, FilingDocument, IPO, IPOLockup
 from app.services.lockup_parser import ParsedLockup
-from app.services.lockup_processing import select_primary_lockup, store_lockups
+from app.services.lockup_processing import process_cached_lockups, select_primary_lockup, store_lockups
 from app.services.schema_upgrade import upgrade_milestone_4
 
 
@@ -38,6 +38,87 @@ def _lockup(group: str, expiration: date, *, duration: int = 180,
         None, None, False, None, Decimal("0.92"), excerpt or f"{group} evidence",
         "Underwriting, line 10",
     )
+
+
+def _cached_ipo(db: Session, number: int, text_path: str, *, classification_status: str,
+                candidate_type: str, offering_status: str) -> IPO:
+    company = Company(cik=f"{number:010d}", name=f"Cached issuer {number}")
+    filing = Filing(company=company, form_type="424B4", filed_at=date(2026, 1, number),
+                    accession_number=f"0000000000-26-{number:06d}", filing_path=f"cached-{number}",
+                    sec_url=f"https://www.sec.gov/{number}")
+    ipo = IPO(company=company, first_filing_date=date(2026, 1, number),
+              classification_status=classification_status, candidate_type=candidate_type,
+              offering_status=offering_status)
+    db.add_all([filing, ipo])
+    db.flush()
+    ipo.final_prospectus_filing_id = filing.id
+    db.add(FilingDocument(filing=filing, source_url=filing.sec_url, fetch_status="success",
+                          text_path=text_path))
+    return ipo
+
+
+def _run_filtered(tmp_path, ipos, **filters):
+    cached_text = tmp_path / "cached.txt"
+    cached_text.write_text("No lockup agreements in this cached document.")
+    with Session(_database()) as db:
+        for number, attributes in enumerate(ipos, start=1):
+            _cached_ipo(db, number, str(cached_text), **attributes)
+        db.commit()
+        return process_cached_lockups(db, **filters)
+
+
+def test_classification_status_filters_cached_lockups(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="needs_review", candidate_type="unknown", offering_status="filed"),
+        dict(classification_status="classified", candidate_type="unknown", offering_status="filed"),
+    ], classification_status="classified")
+    assert result["ipos_seen"] == 1
+
+
+def test_candidate_type_filters_cached_lockups(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="classified", candidate_type="spac", offering_status="priced"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="priced"),
+    ], candidate_type="operating_company_ipo")
+    assert result["ipos_seen"] == 1
+
+
+def test_offering_status_filters_cached_lockups(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="withdrawn"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="priced"),
+    ], offering_status="priced")
+    assert result["ipos_seen"] == 1
+
+
+def test_cached_lockup_filters_compose(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="needs_review", candidate_type="operating_company_ipo", offering_status="priced"),
+        dict(classification_status="classified", candidate_type="spac", offering_status="priced"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="filed"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="priced"),
+    ], classification_status="classified", candidate_type="operating_company_ipo",
+       offering_status="priced")
+    assert result["ipos_seen"] == 1
+
+
+def test_cached_lockup_filters_are_applied_before_limit(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="needs_review", candidate_type="unknown", offering_status="filed"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="priced"),
+    ], classification_status="classified", candidate_type="operating_company_ipo",
+       offering_status="priced", limit=1)
+    assert result["ipos_seen"] == 1
+    assert result["documents_available"] == 1
+
+
+def test_cached_lockups_without_filters_still_process_all_linked_ipos(tmp_path):
+    result = _run_filtered(tmp_path, [
+        dict(classification_status="needs_review", candidate_type="unknown", offering_status="filed"),
+        dict(classification_status="classified", candidate_type="operating_company_ipo", offering_status="priced"),
+    ])
+    assert result["ipos_seen"] == 2
+    assert result["documents_available"] == 2
 
 
 def test_existing_stockholders_take_priority_over_directors_officers():

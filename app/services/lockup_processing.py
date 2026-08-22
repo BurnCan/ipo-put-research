@@ -84,13 +84,19 @@ def select_primary_lockup(db: Session, ipo: IPO) -> dict[str, int]:
 
 
 def process_cached_lockups(db: Session, *, limit: int | None = None, ipo_id: int | None = None,
-                           reparse: bool = False) -> dict[str, int]:
+                           reparse: bool = False, classification_status: str | None = None,
+                           candidate_type: str | None = None,
+                           offering_status: str | None = None) -> dict[str, int]:
     summary = {key: 0 for key in ("ipos_seen", "documents_available", "documents_skipped",
                                    "lockups_created", "ipos_with_lockups", "primary_lockups_selected",
                                    "ambiguities", "errors")}
     stmt = select(IPO).options(joinedload(IPO.final_prospectus).joinedload(Filing.document)).where(
         IPO.final_prospectus_filing_id.is_not(None)).order_by(IPO.id)
     if ipo_id is not None: stmt = stmt.where(IPO.id == ipo_id)
+    if classification_status is not None: stmt = stmt.where(IPO.classification_status == classification_status)
+    if candidate_type is not None: stmt = stmt.where(IPO.candidate_type == candidate_type)
+    if offering_status is not None: stmt = stmt.where(IPO.offering_status == offering_status)
+    # Compose the research-universe predicates before limiting the selected IPOs.
     if limit is not None: stmt = stmt.limit(limit)
     for ipo in db.scalars(stmt).unique():
         summary["ipos_seen"] += 1
