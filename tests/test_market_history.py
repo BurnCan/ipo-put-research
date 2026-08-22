@@ -14,6 +14,7 @@ from app.models import Company, DailyPrice, IPO, IPOMarketSummary, Security
 from app.services.market_data.base import DailyBar, MarketDataError, ProviderConfigurationError
 from app.services.market_data.massive import MassiveMarketDataProvider
 from app.services.market_history import ingest_market_history
+from app.services.market_summary import recompute_market_summaries
 from app.services.schema_upgrade import upgrade_milestone_5
 
 
@@ -102,6 +103,49 @@ def test_ingest_initializes_security_creates_bars_and_is_idempotent():
         assert db.scalar(select(func.count()).select_from(DailyPrice)) == 1
         assert ipo.ipo_date == date(2025, 1, 2)
         assert ipo.market_summary.first_trade_date == date(2025, 1, 3)
+
+
+def test_no_fetch_rerun_recomputes_summary_after_ipo_price_change():
+    provider = Provider([bar(date(2025, 1, 3))])
+    with Session(database()) as db:
+        ipo = add_ipo(db, price=None)
+        ingest_market_history(db, provider, end_date=date(2025, 1, 3))
+        prices_before = db.execute(select(
+            DailyPrice.id, DailyPrice.trade_date, DailyPrice.open, DailyPrice.high,
+            DailyPrice.low, DailyPrice.close, DailyPrice.volume, DailyPrice.fetched_at,
+        )).all()
+        ipo.ipo_price = Decimal("10")
+        db.commit()
+        calls_before = len(provider.calls)
+
+        report = ingest_market_history(db, provider, end_date=date(2025, 1, 3))
+
+        assert report.skipped_current == 1
+        assert len(provider.calls) == calls_before
+        assert db.execute(select(
+            DailyPrice.id, DailyPrice.trade_date, DailyPrice.open, DailyPrice.high,
+            DailyPrice.low, DailyPrice.close, DailyPrice.volume, DailyPrice.fetched_at,
+        )).all() == prices_before
+        assert ipo.market_summary.first_day_close_return_vs_ipo_price == Decimal(".1")
+        assert ipo.market_summary.return_from_ipo_price == Decimal(".1")
+
+
+def test_offline_summary_recompute_is_filtered_and_idempotent():
+    provider = Provider([bar(date(2025, 1, 3))])
+    with Session(database()) as db:
+        ipo = add_ipo(db, price=None)
+        ingest_market_history(db, provider, end_date=date(2025, 1, 3))
+        ipo.ipo_price = Decimal("10")
+        db.commit()
+        prices_before = db.execute(select(DailyPrice.id, DailyPrice.fetched_at)).all()
+
+        first = recompute_market_summaries(db, "fake", ipo_id=ipo.id, ticker="mkt", limit=1)
+        second = recompute_market_summaries(db, "fake", ipo_id=ipo.id, ticker="MKT", limit=1)
+
+        assert first.summaries_recomputed == second.summaries_recomputed == 1
+        assert provider.calls == [("MKT", date(2025, 1, 2), date(2025, 1, 3))]
+        assert db.execute(select(DailyPrice.id, DailyPrice.fetched_at)).all() == prices_before
+        assert ipo.market_summary.return_from_ipo_price == Decimal(".1")
 
 
 def test_incremental_fetch_begins_after_latest_bar():
