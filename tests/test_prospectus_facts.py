@@ -75,3 +75,34 @@ def test_deal_size_is_cleared_when_a_canonical_input_becomes_ambiguous():
 
         assert ipo.shares_offered is None
         assert ipo.deal_size is None
+
+
+def test_v1_facts_coexist_but_v2_semantics_drive_reparse_promotion():
+    with Session(_database()) as db:
+        ipo, filing = _ipo_with_prospectus(db)
+        db.add(IPOFact(
+            ipo_id=ipo.id, filing_id=filing.id, field_name="shares_offered",
+            value_numeric=Decimal("24390243"), value_key="old-v1", unit="shares",
+            confidence=Decimal("0.94"), parser_name="final_prospectus_offering",
+            parser_version="1", source_excerpt="We are offering 24,390,243 shares",
+            source_locator="Prospectus cover", is_derived=True,
+            derivation="primary_shares (no selling shares stated)"))
+        store_facts(db, ipo, filing.id, [
+            _fact("ipo_price", "22", "IPO price is $22"),
+            _fact("primary_shares", "24390243", "We are offering 24,390,243 shares"),
+            _fact("secondary_shares", "13170731", "Stockholder is offering 13,170,731 shares"),
+            ParsedFact("shares_offered", Decimal("37560974"), "shares", Decimal("0.96"),
+                       "Derived from issuer and stockholder shares", "Prospectus cover", True,
+                       "primary_shares + secondary_shares"),
+        ])
+
+        result = promote_canonical_facts(db, ipo)
+
+        assert ipo.ipo_price == Decimal("22")
+        assert ipo.primary_shares == Decimal("24390243")
+        assert ipo.secondary_shares == Decimal("13170731")
+        assert ipo.shares_offered == Decimal("37560974")
+        assert ipo.deal_size == Decimal("826341428")
+        assert result["ambiguities"] == 0
+        assert db.scalar(select(func.count()).select_from(IPOFact).where(
+            IPOFact.parser_version == "1")) == 1
