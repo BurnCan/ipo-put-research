@@ -84,6 +84,9 @@ def test_limit_two_returns_every_offset_for_exactly_two_events(backtest_database
 
 def test_export_reports_event_level_limited_count(backtest_database, monkeypatch, tmp_path, capsys):
     db, _, first, second, _ = backtest_database
+    first_id = first.id
+    second_id = second.id
+    rows = build_backtest_dataset(db, limit=2)
     monkeypatch.setattr(export_lockup_backtest, "SessionLocal", lambda: db)
     output = tmp_path / "limited.csv"
     monkeypatch.setattr(sys, "argv", ["export_lockup_backtest.py", "--limit", "2",
@@ -94,6 +97,9 @@ def test_export_reports_event_level_limited_count(backtest_database, monkeypatch
     report = json.loads(capsys.readouterr().out)
     assert report["n_events"] == 2
     assert report["n_observations"] == 9
-    assert len({row["lockup_id"] for row in build_backtest_dataset(db, limit=2)}) == 2
-    assert {first.id, second.id} == {
-        row["lockup_id"] for row in build_backtest_dataset(db, limit=2)}
+    selected_lockup_ids = {row["lockup_id"] for row in rows}
+    assert selected_lockup_ids == {first_id, second_id}
+    assert {row["observation_offset"] for row in rows
+            if row["lockup_id"] == first_id} == {-40, -20, -10, -5, -2, -1}
+    assert {row["observation_offset"] for row in rows
+            if row["lockup_id"] == second_id} == {-20, -5, -1}
