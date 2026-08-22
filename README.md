@@ -180,8 +180,29 @@ Do **not** commit `.env`; it is excluded by `.gitignore`.
 
 ### Massive Stocks Basic setup
 
-Create a Massive account/API key, then put the key only in your local `.env` as shown above. The
-application, SEC pipeline, API, and dashboard work without this key; only the market-ingestion
+Get an API key from the developer's Massive account, then edit the local `.env` (not
+`.env.example`) and set:
+
+```env
+MARKET_DATA_PROVIDER=massive
+MASSIVE_API_KEY=your-api-key-here
+```
+
+Never commit the real key. `.env` is gitignored, while `.env.example` contains placeholders only.
+Verify the configuration without printing the secret itself:
+
+```bash
+python -c "from app.config import settings; print(settings.market_data_provider); print(bool(settings.massive_api_key))"
+```
+
+The expected output is:
+
+```text
+massive
+True
+```
+
+The application, SEC pipeline, API, and dashboard work without this key; only the market-ingestion
 command requires it and reports a clear configuration error when it is absent.
 
 Massive is isolated behind `MarketDataProvider`. The ingestion and summary layers consume normalized
@@ -357,20 +378,30 @@ parser name/version + an evidence identity key (value, source, confidence, and d
 remain available.
 
 The single canonical promotion threshold is **0.90**. Facts below it remain available without changing
-canonical IPO data. Only facts from `final_prospectus_filing_id` qualify. Distinct high-confidence values
+canonical IPO data. Only current-version facts from `final_prospectus_filing_id` qualify; prior-version
+facts remain as provenance but do not override corrected parser semantics. Distinct high-confidence values
 for the same field are reported as ambiguous and clear the canonical field rather than retaining stale data. Unchanged values
-are not rewritten. When canonical price and offered shares exist, deal size is recorded as a derived fact
-(`ipo_price * shares_offered`) using the lower input confidence.
+are not rewritten. `primary_shares` means shares sold by the issuer/company, while
+`secondary_shares` means shares sold by existing/selling stockholders. `shares_offered` is the total base
+offering sold to the public: `primary_shares + secondary_shares` when both are explicitly present.
+Optional underwriter over-allotment/greenshoe shares are not included yet.
+
+When canonical price and offered shares exist, `deal_size` is recorded as a derived fact
+(`ipo_price * shares_offered`) using the lower input confidence. It therefore represents total base
+offering value, not issuer net proceeds.
 
 ### Parsed fields and limitations
 
-Parser `final_prospectus_offering` version `1` attempts only `ipo_price`, `shares_offered`,
+Parser `final_prospectus_offering` version `2` attempts only `ipo_price`, `shares_offered`,
 `primary_shares`, `secondary_shares`, `shares_outstanding_post_ipo`, and derived `deal_size`. It prioritizes
 explicit cover/summary language and avoids authorized, option-plan, over-allotment, historical-financing,
 pre-offering, fully diluted, option, and warrant counts. Ambiguous language is intentionally unpromoted.
 
 This milestone does not parse lockups, underwriters, financial statements, use of proceeds, market data,
 or options, and does not reconstruct complex tables or perform OCR.
+
+Prospectus reprocessing does not trigger market-history work. After a newly extracted IPO price is
+promoted, market history can be refreshed/recomputed separately to update price-based returns.
 
 The list API exposes canonical offering values and compact cache/fact counts. The detail API also exposes
 concise fact provenance. The dashboard shows price, offered shares, derived deal size, and parsed status.

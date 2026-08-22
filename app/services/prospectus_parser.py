@@ -4,7 +4,7 @@ from decimal import Decimal
 import re
 
 PARSER_NAME = "final_prospectus_offering"
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 CANONICAL_PROMOTION_CONFIDENCE = Decimal("0.90")
 
 @dataclass(frozen=True)
@@ -31,8 +31,18 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
     # historical financing and option-plan language becoming offering totals.
     cover = text[:20000]
     facts: list[ParsedFact] = []
-    price = re.search(r"(?:initial public )?offering price (?:is|of)\s*\$\s*(\d+(?:\.\d+)?)\s+per share", cover, re.I)
-    if price: facts.append(_fact("ipo_price", price, 1, "USD/share", "0.98"))
+    # These deliberately require an explicit public/offering-price label.  A broad
+    # "$X per share" match would pick up dilution, option plans and financings.
+    price_patterns = [
+        r"initial\s+public\s+offering\s+price\s+per\s+share\s+(?:will\s+be|is)\s*\$\s*(\d+(?:\.\d+)?)",
+        r"initial\s+public\s+offering\s+price\s+(?:of|:)\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
+        r"(?:initial\s+public\s+)?offering\s+price\s+is\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
+        r"public\s+offering\s+price\s*:\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
+        r"price\s+to\s+public\s*:\s*\$\s*(\d+(?:\.\d+)?)\s+per\s+share",
+    ]
+    for pattern in price_patterns:
+        facts.extend(_fact("ipo_price", match, 1, "USD/share", "0.99")
+                     for match in re.finditer(pattern, cover, re.I))
 
     primary_patterns = [
         r"(?:we|the company) (?:are|is) offering\s+([\d,]+)\s+shares",
@@ -41,6 +51,9 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
     secondary_patterns = [
         r"selling (?:stockholders|shareholders) (?:are )?offering\s+([\d,]+)\s+shares",
         r"([\d,]+)\s+shares (?:are being )?offered by (?:the )?selling (?:stockholders|shareholders)",
+        # Bounded to one sentence on the cover so later descriptions of a
+        # principal shareholder's transactions cannot become offering facts.
+        r"our principal (?:stockholder|shareholder)[^.!?]{0,400}?\bis offering\s+([\d,]+)\s+shares",
     ]
     primary = next((re.search(p, cover, re.I) for p in primary_patterns if re.search(p, cover, re.I)), None)
     secondary = next((re.search(p, cover, re.I) for p in secondary_patterns if re.search(p, cover, re.I)), None)
@@ -53,10 +66,17 @@ def extract_ipo_facts(text: str) -> list[ParsedFact]:
         facts.append(_fact("shares_offered", total_matches[0], 1, "shares", "0.96"))
     elif len(distinct) > 1:
         facts.extend(_fact("shares_offered", m, 1, "shares", "0.80") for m in total_matches)
-    elif primary and not secondary:
+    if primary and secondary:
+        primary_value = _number(primary.group(1))
+        secondary_value = _number(secondary.group(1))
+        facts.append(ParsedFact(
+            "shares_offered", primary_value + secondary_value, "shares", Decimal("0.96"),
+            "Derived from explicit issuer and selling-stockholder shares on the prospectus cover",
+            "Prospectus cover", True, "primary_shares + secondary_shares"))
+    elif not total_matches and primary and not secondary:
         facts.append(ParsedFact("shares_offered", _number(primary.group(1)), "shares", Decimal("0.94"),
                                 re.sub(r"\s+", " ", primary.group(0))[:500], "Prospectus cover", True, "primary_shares (no selling shares stated)"))
-    elif secondary and not primary:
+    elif not total_matches and secondary and not primary:
         facts.append(ParsedFact("shares_offered", _number(secondary.group(1)), "shares", Decimal("0.94"),
                                 re.sub(r"\s+", " ", secondary.group(0))[:500], "Prospectus cover", True, "secondary_shares (no company shares stated)"))
 

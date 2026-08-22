@@ -52,6 +52,9 @@ def promote_canonical_facts(db: Session, ipo: IPO) -> dict[str, int]:
     if ipo.final_prospectus_filing_id is None: return {"updated": 0, "ambiguities": 0, "facts_created": 0}
     facts = db.scalars(select(IPOFact).where(
         IPOFact.ipo_id == ipo.id, IPOFact.filing_id == ipo.final_prospectus_filing_id,
+        # A parser-version change may intentionally correct old semantics. Keep
+        # old provenance rows, but canonicalize from the current interpretation.
+        IPOFact.parser_name == PARSER_NAME, IPOFact.parser_version == PARSER_VERSION,
         IPOFact.confidence >= CANONICAL_PROMOTION_CONFIDENCE)).all()
     updated = ambiguities = derived_created = 0
     by_field = {}
