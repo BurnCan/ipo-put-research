@@ -7,7 +7,7 @@ from decimal import Decimal
 import re
 
 PARSER_NAME = "deterministic_lockup_parser"
-PARSER_VERSION = "1.0"
+PARSER_VERSION = "1.1"
 CONFIDENCE_VERY_HIGH = Decimal("0.97")
 CONFIDENCE_HIGH = Decimal("0.92")
 CONFIDENCE_PLAUSIBLE = Decimal("0.82")
@@ -19,6 +19,24 @@ HEADINGS = re.compile(
 CONCEPT = re.compile(r"lock[ -]?up|agree(?:d)?(?:.{0,100})?(?:not to|will not)|(?:may|will) not (?:offer|sell)|restricted from", re.I)
 EARLY = re.compile(r"waiv(?:e|er)|early release|release .*shares|blackout|staggered release|partial release", re.I)
 ANCHOR = re.compile(r"(?:after|following) (?:the )?date of (?:this|the) prospectus", re.I)
+# Some prospectuses identify the banks only by name in the operative restriction.
+# Keep this deliberately narrow: the phrase must name a securities firm (rather
+# than merely mentioning generic written consent) and is only consulted for a
+# sale restriction already found inside a recognized section.
+NAMED_BANK_CONSENT = re.compile(
+    r"(?:without (?:first obtaining|the prior) (?:the )?written consent of|"
+    r"may be waived by|written consent of)"
+    r"(?=[^.]{0,180}\b(?:Securities|Capital Markets|Company)\b)"
+    r"[^.]{0,180}\b(?:Inc\.?|LLC|L\.?P\.?|Ltd\.?)",
+    re.I,
+)
+LINKED_BANK_WAIVER = re.compile(
+    r"(?:this|these|the|such) (?:sale |transfer )?(?:restriction|lock[ -]?up)s? "
+    r"may be waived by"
+    r"(?=[^.]{0,180}\b(?:Securities|Capital Markets|Company)\b)"
+    r"[^.]{0,180}\b(?:Inc\.?|LLC|L\.?P\.?|Ltd\.?)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -137,9 +155,15 @@ def extract_lockup_agreements(text: str, prospectus_date: date | None = None) ->
             if duration is None and stated is None:
                 continue
             group, group_text = parse_holder_group(sentence)
+            # Require named-bank consent in the operative sentence, or an
+            # explicitly linked waiver in the evidence window. Nearby consent
+            # for an unrelated action must not upgrade the classification.
+            named_bank_consent = bool(
+                NAMED_BANK_CONSENT.search(sentence) or LINKED_BANK_WAIVER.search(window)
+            )
             lockup_type = ("company_lockup" if group == "company" else
                            "market_standoff" if "market standoff" in window.lower() else
-                           "underwriter_lockup" if re.search(r"underwriter|representative", window, re.I) else "unknown")
+                           "underwriter_lockup" if re.search(r"underwriter|representative", window, re.I) or named_bank_consent else "unknown")
             calculated = prospectus_date + timedelta(days=duration) if duration and prospectus_date and ANCHOR.search(window) else None
             early, terms = detect_early_release(window)
             confidence = CONFIDENCE_HIGH if lockup_type == "underwriter_lockup" and group != "unknown" else CONFIDENCE_PLAUSIBLE
