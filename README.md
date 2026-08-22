@@ -614,6 +614,20 @@ python scripts/extract_lockups.py --limit 25
 python scripts/extract_lockups.py --ipo-id 123 --reparse
 ```
 
+For building the operating-company lockup research cohort, the recommended command is:
+
+```bash
+python scripts/extract_lockups.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --limit 25
+```
+
+Omit `--limit 25` to process the entire cohort. These optional filters are composable and are applied
+before `--limit`; with no filters, extraction retains its existing behavior of considering every IPO
+with a linked final prospectus.
+
 `--reparse` runs current parser logic again but its evidence key preserves exact-rerun idempotency.
 IPOs without a successful normalized cached document are skipped and reported; this command does not
 fetch them.
