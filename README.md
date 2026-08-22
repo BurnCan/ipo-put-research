@@ -286,12 +286,12 @@ OCR, AI, or LLM dependency.
 
 `ipo_facts` records the IPO and source filing, typed value, unit, confidence, stable parser name/version,
 short excerpt/location, and direct or derived status. Exact duplicate identity is IPO + filing + field +
-parser name/version + canonical value key, so reruns do not duplicate facts while earlier parser versions
+parser name/version + an evidence identity key (value, source, confidence, and derivation), so reruns do not duplicate facts while distinct provenance and earlier parser versions
 remain available.
 
 The single canonical promotion threshold is **0.90**. Facts below it remain available without changing
 canonical IPO data. Only facts from `final_prospectus_filing_id` qualify. Distinct high-confidence values
-for the same field are reported as ambiguous and leave the canonical field unchanged. Unchanged values
+for the same field are reported as ambiguous and clear the canonical field rather than retaining stale data. Unchanged values
 are not rewritten. When canonical price and offered shares exist, deal size is recorded as a derived fact
 (`ipo_price * shares_offered`) using the lower input confidence.
 
