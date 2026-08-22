@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date
 
 
 def event_date_with_source(lockup):
@@ -23,19 +23,3 @@ def get_trading_session_offset(bars, anchor_date: date, offset: int):
         return None
     target = anchor + offset
     return bars[target] if 0 <= target < len(bars) else None
-
-
-def projected_weekday_offset(anchor: date, offset: int) -> date:
-    """Fallback only for prospective observations when the event session is not stored.
-
-    This does not claim to be an exchange calendar and is never persisted as
-    ``event_trade_date``. Stored bars must exactly match the projected observation.
-    """
-    day = anchor
-    step = 1 if offset > 0 else -1
-    remaining = abs(offset)
-    while remaining:
-        day += timedelta(days=step)
-        if day.weekday() < 5:
-            remaining -= 1
-    return day

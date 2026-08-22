@@ -3,7 +3,15 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from app.db import Base
+from app.models import (Company, DailyPrice, Filing, IPO, IPOLockup, LockupSignalSnapshot,
+                        Security)
+from app.services.event_analysis.analysis import recompute_lockup_analysis
+from app.services.event_analysis.constants import SNAPSHOT_OFFSETS
 from app.services.event_analysis.lockup_outcomes import compute_event_outcome
 from app.services.event_analysis.lockup_snapshots import compute_snapshot
 from app.services.event_analysis.sessions import (align_event_trade_date, event_date_with_source,
@@ -25,6 +33,35 @@ def weekdays(start, count):
     return result
 
 
+def analysis_database(event_date, dates):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    company = Company(cik="0000000042", name="Session Co", ticker="SES", exchange="NYSE")
+    filing = Filing(company=company, form_type="424B4", filed_at=dates[0],
+                    accession_number="0000000042-26-000001", filing_path="filing.txt",
+                    sec_url="https://example.test/filing")
+    ipo = IPO(company=company, ipo_date=dates[0], ipo_price=10, shares_offered=100,
+              primary_shares=80, secondary_shares=20, deal_size=1000)
+    lockup = IPOLockup(ipo=ipo, filing=filing, holder_group="all", lockup_type="standard",
+                       duration_days=180, stated_expiration_date=event_date, confidence=.9,
+                       parser_name="test", parser_version="1", source_excerpt="test",
+                       source_locator="test", evidence_key=f"event-{event_date}")
+    security = Security(company=company, ticker="SES", exchange="NYSE", is_primary=True,
+                        source="test")
+    db.add_all([lockup, security])
+    db.flush()
+    db.add_all([
+        DailyPrice(security_id=security.id, trade_date=day, open=10 + index,
+                   high=11 + index, low=9 + index, close=10 + index, volume=1000,
+                   provider="test", provider_symbol="SES")
+        for index, day in enumerate(dates)
+    ])
+    db.commit()
+    return db, lockup, security
+
+
 def test_date_provenance_alignment_and_offsets():
     lockup = SimpleNamespace(stated_expiration_date=date(2026, 4, 11),
                              calculated_expiration_date=date(2026, 4, 10))
@@ -36,6 +73,36 @@ def test_date_provenance_alignment_and_offsets():
     assert align_event_trade_date(bars[:1], date(2026, 4, 11)) is None
     assert get_trading_session_offset(bars, date(2026, 4, 13), -1).trade_date == date(2026, 4, 10)
     assert get_trading_session_offset(bars, date(2026, 4, 13), 1).trade_date == date(2026, 4, 14)
+
+
+def test_prospective_snapshots_do_not_approximate_a_weekday_holiday():
+    dates = [day for day in weekdays(date(2026, 3, 2), 75)
+             if day != date(2026, 6, 8) and day <= date(2026, 6, 12)]
+    db, lockup, security = analysis_database(date(2026, 6, 16), dates)
+    try:
+        report = recompute_lockup_analysis(db, lockup, security)
+        snapshots = list(db.scalars(select(LockupSignalSnapshot)))
+        assert report.snapshots_created == 0
+        assert snapshots == []
+    finally:
+        db.close()
+
+
+def test_historical_snapshots_use_exact_stored_sessions_across_holiday():
+    dates = [day for day in weekdays(date(2026, 2, 2), 100)
+             if day != date(2026, 6, 8) and day <= date(2026, 6, 16)]
+    db, lockup, security = analysis_database(date(2026, 6, 16), dates)
+    try:
+        report = recompute_lockup_analysis(db, lockup, security)
+        snapshots = list(db.scalars(select(LockupSignalSnapshot).order_by(
+            LockupSignalSnapshot.observation_offset)))
+        event_index = dates.index(date(2026, 6, 16))
+        expected = {offset: dates[event_index + offset] for offset in SNAPSHOT_OFFSETS}
+        assert report.snapshots_created == len(SNAPSHOT_OFFSETS)
+        assert {row.observation_offset: row.observation_date for row in snapshots} == expected
+        assert expected[-10] == date(2026, 6, 1)
+    finally:
+        db.close()
 
 
 def test_snapshot_exact_windows_and_no_lookahead():

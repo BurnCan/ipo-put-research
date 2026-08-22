@@ -9,7 +9,7 @@ from .constants import OUTCOME_VERSION, SNAPSHOT_OFFSETS, SNAPSHOT_VERSION
 from .lockup_outcomes import compute_event_outcome
 from .lockup_snapshots import compute_snapshot, get_price_history_as_of
 from .sessions import (align_event_trade_date, event_date_with_source,
-                       get_trading_session_offset, projected_weekday_offset)
+                       get_trading_session_offset)
 
 
 @dataclass
@@ -57,14 +57,21 @@ def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None =
         return report
     event_trade_date = align_event_trade_date(bars, event_date)
     report.events_aligned += int(event_trade_date is not None)
-    by_date = {bar.trade_date: bar for bar in bars}
+    if event_trade_date is None:
+        # Remove rows produced by older weekday-based prospective projection.
+        stale_snapshots = db.scalars(select(LockupSignalSnapshot).where(
+            LockupSignalSnapshot.lockup_id == lockup.id,
+            LockupSignalSnapshot.security_id == security.id,
+            LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION))
+        for snapshot in stale_snapshots:
+            db.delete(snapshot)
     for offset in SNAPSHOT_OFFSETS:
-        if event_trade_date is not None:
-            observation = get_trading_session_offset(bars, event_trade_date, offset)
-        else:
-            # Prospective fallback: weekdays identify eligible observation dates;
-            # only an actual stored bar can become a snapshot.
-            observation = by_date.get(projected_weekday_offset(event_date, offset))
+        # Without the stored event session, a negative session offset is ambiguous:
+        # intervening future exchange holidays are not represented in daily_prices.
+        # Wait for the event session rather than approximating it with weekdays.
+        if event_trade_date is None:
+            continue
+        observation = get_trading_session_offset(bars, event_trade_date, offset)
         if observation is None or observation.trade_date > bars[-1].trade_date:
             continue
         as_of = get_price_history_as_of(db, security.id, observation.trade_date)

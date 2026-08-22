@@ -53,10 +53,9 @@ out every later bar. This is an enforced guardrail against look-ahead bias, not 
 An observation row is still created with short history, but an exact unavailable window remains
 null rather than being relabeled (for example, 17 sessions never becomes a 20-session return).
 
-For prospective events without a stored event session, weekday projection is used only to identify
-an eligible pre-event observation that must match an actual stored bar. It is not persisted as an
-exchange session or as `event_trade_date`; exchange holidays are a known limitation until a market
-calendar is introduced.
+For prospective events without a stored event session, snapshots remain ungenerated because future
+exchange holidays make their trading-session offsets ambiguous. Once the event session is present,
+all offsets are resolved exclusively against the authoritative stored `daily_prices` sequence.
 
 ### Snapshot measurements
 
