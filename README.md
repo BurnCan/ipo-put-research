@@ -20,11 +20,11 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 
 ```text
 SEC candidate discovery → SEC submissions enrichment → candidate classification
-  → final prospectus association → prospectus cache → offering fact extraction
-  → lockup agreement extraction → primary lockup signal
+  → final prospectus association → prospectus extraction → lockup extraction
+  → market-history ingestion → market summary metrics
 ```
 
-Milestone 4 implements the lockup/supply-catalyst portion of this pipeline. Market, options, scoring, and trading stages remain out of scope.
+Milestone 5 adds the market-behavior layer. Options, composite scoring, and trading remain out of scope.
 
 ## Recommended environment
 
@@ -156,6 +156,10 @@ The default `.env.example` contains:
 DATABASE_URL=postgresql+psycopg://ipo_app:ipo_dev_password@localhost:5432/ipo_research
 SEC_USER_AGENT=IPO Research Prototype your-email@example.com
 FILING_CACHE_DIR=./data/filings
+MARKET_DATA_PROVIDER=massive
+MASSIVE_API_KEY=your-api-key-here
+MARKET_INITIAL_LOOKBACK_DAYS=730
+MARKET_REFRESH_DAYS=30
 ```
 
 ### Change the SEC contact email
@@ -173,6 +177,69 @@ SEC_USER_AGENT=IPO Research Prototype jane@example.com
 ```
 
 Do **not** commit `.env`; it is excluded by `.gitignore`.
+
+### Massive Stocks Basic setup
+
+Create a Massive account/API key, then put the key only in your local `.env` as shown above. The
+application, SEC pipeline, API, and dashboard work without this key; only the market-ingestion
+command requires it and reports a clear configuration error when it is absent.
+
+Massive is isolated behind `MarketDataProvider`. The ingestion and summary layers consume normalized
+`DailyBar` values, so a future provider can replace Massive without changing the database or research
+logic. The adapter calls the daily aggregate endpoint in ascending order with `adjusted=false`.
+Consequently, `open`, `high`, `low`, `close`, and `volume` are authoritative **raw** observations;
+raw close is never silently replaced by an adjusted value.
+
+### Security identity and incremental history
+
+`securities` preserves the symbol actually used for a fetch separately from the convenient current
+`companies.ticker`. This permits multiple or time-bounded symbols later and ensures a ticker change
+does not delete old observations. Initialization from SEC company metadata is deterministic and
+idempotent. `daily_prices` retains the provider and provider symbol on every normalized observation.
+
+The first fetch starts at the IPO date when known. When it is unknown, the fetch uses the bounded
+`MARKET_INITIAL_LOOKBACK_DAYS` provider lookback (two years by default); the SEC registration's
+`first_filing_date` is never treated as evidence that trading began. The earliest returned bar
+establishes the observed first trading day; it does not modify `IPO.ipo_date`. Later runs start at
+`latest_trade_date + 1 day`, skip requests when already current, and enforce database uniqueness by
+security/date/provider. `--refresh` re-fetches and upserts only the most recent
+`MARKET_REFRESH_DAYS` calendar days (30 by default), preserving older bars while allowing recent
+provider corrections. Use `--refresh-days N` to override that window explicitly. `--sleep` defaults
+to a conservative 12 seconds between symbols; transient 408/429/5xx responses use bounded
+exponential retry/backoff.
+
+Run the idempotent schema upgrade and an ingestion batch from the repository root:
+
+```bash
+python scripts/upgrade_schema.py
+python scripts/ingest_market_history.py --limit 5
+python scripts/ingest_market_history.py --ipo-id 14
+python scripts/ingest_market_history.py --ticker ALH
+python scripts/ingest_market_history.py --ticker ALH --refresh --sleep 12
+python scripts/ingest_market_history.py --ticker ALH --refresh --refresh-days 90
+```
+
+### Market summary metrics
+
+`ipo_market_summary` is a rerunnable derived cache, not raw evidence. It records the earliest bar's
+open/close, latest close/date, and maximum raw daily high. Returns are decimal fractions (`0.25`
+means +25%):
+
+* `first_day_close_return_vs_ipo_price = (first_day_close - ipo_price) / ipo_price`
+* `return_from_ipo_price = (latest_close - ipo_price) / ipo_price`
+* `drawdown_from_post_ipo_high = (latest_close - post_ipo_high) / post_ipo_high`
+
+Drawdown is normally zero or negative. When IPO price is missing, both IPO-relative returns remain
+null while all observed-price fields and drawdown are still calculated. Compact summaries appear in
+IPO list/detail responses and the dashboard; bounded raw history is available at
+`GET /api/ipos/{id}/prices?limit=500`.
+
+### Market-data limitations
+
+Massive Basic may return only the history covered by the current plan. Partial/no data is reported
+separately rather than treated as fatal. This milestone does not implement options, intraday bars,
+full corporate-action normalization, complete historical ticker-change resolution, delisted-symbol
+completeness, lockup-event backtesting, or composite bearish scoring.
 
 ## 6. Ingest recent IPO candidates
 

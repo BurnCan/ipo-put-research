@@ -47,7 +47,19 @@ def upgrade_milestone_3(engine: Engine) -> list[str]:
 
 
 def upgrade_schema(engine: Engine) -> list[str]:
-    return upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine)
+    return upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine) + upgrade_milestone_5(engine)
+
+
+def upgrade_milestone_5(engine: Engine) -> list[str]:
+    """Create normalized market identity, observations, and derived summaries."""
+    from app.models import DailyPrice, IPOMarketSummary, Security
+    changed = []
+    existing = set(inspect(engine).get_table_names())
+    for table in (Security.__table__, DailyPrice.__table__, IPOMarketSummary.__table__):
+        if table.name not in existing:
+            table.create(engine, checkfirst=True)
+            changed.append(table.name)
+    return changed
 
 
 def upgrade_milestone_4(engine: Engine) -> list[str]:
