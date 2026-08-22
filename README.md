@@ -349,6 +349,11 @@ restriction concepts inside those regions. An unrelated day count elsewhere in a
 considered. Each match becomes an agreement-level `ipo_lockups` row with its source excerpt and
 locator, filing, parser name/version, and confidence.
 
+Within those bounded regions, a sale or transfer restriction requiring prior written consent or a
+waiver from specifically named securities firms is treated as an underwriter lockup even when the
+operative sentence identifies the offering banks by name rather than by the words “underwriter” or
+“representative.” Generic written-consent language without a sale restriction does not qualify.
+
 An IPO may have multiple rows because company issuance restrictions, shareholder restrictions,
 market-standoff terms, or distinct holder groups can coexist. Controlled lockup types are
 `underwriter_lockup`, `company_lockup`, `market_standoff`, `contractual_restriction`, `other`, and
