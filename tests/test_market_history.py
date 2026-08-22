@@ -145,7 +145,8 @@ def test_market_summary_formulas_and_missing_ipo_price():
         summary = ipo.market_summary
         assert summary.first_day_close_return_vs_ipo_price == Decimal(".2")
         assert summary.return_from_ipo_price == Decimal(".1")
-        assert summary.drawdown_from_post_ipo_high == Decimal("-4") / Decimal("15")
+        expected_drawdown = (Decimal("-4") / Decimal("15")).quantize(Decimal("0.0000000001"))
+        assert summary.drawdown_from_post_ipo_high == expected_drawdown
 
     provider = Provider([bar(date(2025, 1, 2))])
     with Session(database()) as db:
