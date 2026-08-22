@@ -6,8 +6,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.db import engine
-from app.services.schema_upgrade import upgrade_milestone_2
+from app.services.schema_upgrade import upgrade_schema
 
 if __name__ == "__main__":
-    changed = upgrade_milestone_2(engine)
+    changed = upgrade_schema(engine)
     print({"columns_added": changed, "changed": bool(changed)})

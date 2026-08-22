@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.models import Company, Filing, IPO
+from app.models import Company, Filing, FilingDocument, IPO, IPOFact
 from app.services.ipo_ingest import ingest_registration_filings
 
 router = APIRouter(prefix="/api")
@@ -34,7 +34,7 @@ def list_ipos(
         stmt = stmt.where((Company.name.ilike(pattern)) | (Company.ticker.ilike(pattern)))
 
     rows = db.execute(stmt).all()
-    return [
+    result = [
         {
             "id": ipo.id,
             "cik": company.cik,
@@ -46,6 +46,10 @@ def list_ipos(
             "ipo_date": ipo.ipo_date,
             "ipo_price": float(ipo.ipo_price) if ipo.ipo_price is not None else None,
             "shares_offered": float(ipo.shares_offered) if ipo.shares_offered is not None else None,
+            "primary_shares": float(ipo.primary_shares) if ipo.primary_shares is not None else None,
+            "secondary_shares": float(ipo.secondary_shares) if ipo.secondary_shares is not None else None,
+            "shares_outstanding_post_ipo": float(ipo.shares_outstanding_post_ipo) if ipo.shares_outstanding_post_ipo is not None else None,
+            "deal_size": float(ipo.deal_size) if ipo.deal_size is not None else None,
             "locked_shares": float(ipo.locked_shares) if ipo.locked_shares is not None else None,
             "unlock_date": ipo.unlock_date,
             "filing_count": count,
@@ -59,6 +63,12 @@ def list_ipos(
         }
         for ipo, company, count in rows
     ]
+    for item in result:
+        document = db.scalar(select(FilingDocument).where(FilingDocument.filing_id == item["final_prospectus"]["id"])) if item["final_prospectus"] else None
+        item["document_cached"] = bool(document and document.fetch_status == "success")
+        item["document_sha256"] = document.sha256 if document else None
+        item["fact_count"] = db.scalar(select(func.count(IPOFact.id)).where(IPOFact.ipo_id == item["id"])) or 0
+    return result
 
 
 @router.get("/ipos/{ipo_id}")
@@ -79,6 +89,11 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             "first_filing_date": ipo.first_filing_date,
             "ipo_date": ipo.ipo_date,
             "ipo_price": float(ipo.ipo_price) if ipo.ipo_price is not None else None,
+            "shares_offered": float(ipo.shares_offered) if ipo.shares_offered is not None else None,
+            "primary_shares": float(ipo.primary_shares) if ipo.primary_shares is not None else None,
+            "secondary_shares": float(ipo.secondary_shares) if ipo.secondary_shares is not None else None,
+            "shares_outstanding_post_ipo": float(ipo.shares_outstanding_post_ipo) if ipo.shares_outstanding_post_ipo is not None else None,
+            "deal_size": float(ipo.deal_size) if ipo.deal_size is not None else None,
             "unlock_date": ipo.unlock_date,
             "candidate_type": ipo.candidate_type,
             "classification_status": ipo.classification_status,
@@ -103,6 +118,14 @@ def ipo_detail(ipo_id: int, db: Session = Depends(get_db)):
             }
             for f in filings
         ],
+        "facts": [{
+            "field_name": fact.field_name,
+            "value": (float(fact.value_numeric) if fact.value_numeric is not None else fact.value_text or fact.value_date),
+            "unit": fact.unit, "confidence": float(fact.confidence),
+            "source_excerpt": fact.source_excerpt, "source_locator": fact.source_locator,
+            "parser_name": fact.parser_name, "parser_version": fact.parser_version,
+            "filing_url": fact.filing.sec_url,
+        } for fact in db.scalars(select(IPOFact).where(IPOFact.ipo_id == ipo.id).order_by(IPOFact.created_at)).all()],
     }
 
 

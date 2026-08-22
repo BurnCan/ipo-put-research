@@ -15,6 +15,13 @@ class IPORead(BaseModel):
     ipo_date: date | None = None
     ipo_price: float | None = None
     shares_offered: float | None = None
+    primary_shares: float | None = None
+    secondary_shares: float | None = None
+    shares_outstanding_post_ipo: float | None = None
+    deal_size: float | None = None
+    document_cached: bool = False
+    document_sha256: str | None = None
+    fact_count: int = 0
     locked_shares: float | None = None
     unlock_date: date | None = None
     filing_count: int = 0

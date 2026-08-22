@@ -26,7 +26,7 @@
         <thead>
           <tr>
             <th>Company</th><th>Ticker</th><th>CIK</th><th>First filing</th>
-            <th>Type</th><th>Offering status</th><th>Classification</th><th>IPO date</th><th>IPO price</th><th>Unlock</th><th>Filings</th>
+            <th>Type</th><th>Offering status</th><th>Classification</th><th>IPO date</th><th>IPO price</th><th>Shares offered</th><th>Deal size</th><th>Parsed</th><th>Unlock</th><th>Filings</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -39,6 +39,7 @@ const statusEl = document.querySelector('#status');
 const searchEl = document.querySelector('#search');
 
 function fmtMoney(v) { return v == null ? '—' : '$' + Number(v).toFixed(2); }
+function fmtNumber(v) { return v == null ? '—' : Number(v).toLocaleString(); }
 function esc(v) { return String(v ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
 
 async function load() {
@@ -57,6 +58,9 @@ async function load() {
       <td title="${esc(x.classification_reason)}">${esc(x.classification_status)}</td>
       <td>${esc(x.ipo_date)}</td>
       <td>${fmtMoney(x.ipo_price)}</td>
+      <td>${fmtNumber(x.shares_offered)}</td>
+      <td>${fmtMoney(x.deal_size)}</td>
+      <td>${x.fact_count ? '✓ ' + esc(x.fact_count) : '—'}</td>
       <td>${esc(x.unlock_date)}</td>
       <td>${esc(x.filing_count)}</td>
     </tr>`).join('');

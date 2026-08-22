@@ -12,6 +12,7 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 - Uses CIK and filing accession numbers for deduplication.
 - Supports idempotent ingestion: rerunning the same date range does not duplicate existing rows.
 - Conservatively classifies candidates from stored SEC filing chronology and associates a plausible final `424B4`.
+- Caches associated final prospectuses and extracts conservative offering facts with provenance.
 
 > **Prototype status:** classifications are heuristic research labels based only on SEC filing metadata, not authoritative legal determinations. Registration statements can represent many transaction types, so uncertain or contradictory cases intentionally remain `unknown` / `needs_review`.
 
@@ -19,11 +20,11 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 
 ```text
 SEC master.idx → IPO candidate discovery → SEC submissions enrichment
-  → Candidate classification → Final prospectus association
-  → Prospectus field extraction → Market/options enrichment → Scoring & backtesting
+  → candidate classification → final prospectus association → prospectus cache
+  → deterministic offering extraction → fact provenance → canonical IPO fields
 ```
 
-Only the pipeline through final-prospectus association is implemented. Milestone 2 does not fetch or parse prospectus contents.
+Milestone 3 implements this displayed pipeline. Market, options, scoring, and trading stages remain out of scope.
 
 ## Recommended environment
 
@@ -154,6 +155,7 @@ The default `.env.example` contains:
 ```env
 DATABASE_URL=postgresql+psycopg://ipo_app:ipo_dev_password@localhost:5432/ipo_research
 SEC_USER_AGENT=IPO Research Prototype your-email@example.com
+FILING_CACHE_DIR=./data/filings
 ```
 
 ### Change the SEC contact email
@@ -250,8 +252,61 @@ Final-prospectus association anchors on the first S-1/F-1 date, considers only p
 `424B4` filings within 180 days, and chooses the nearest. If the two nearest candidates are within
 three days, no prospectus is linked and the case is marked `needs_review`. `RW` and `EFFECT` use the
 same window. A confidently linked prospectus remains `priced` despite a later `RW`, because that
-withdrawal may relate to another sequence. This is chronology-based association only: prospectus
-contents are not parsed.
+withdrawal may relate to another sequence. This chronology-based association defines the source filing
+eligible for Milestone 3 parsing.
+
+## Prospectus processing (Milestone 3)
+
+First apply the data-preserving, idempotent schema upgrade, then process associated final prospectuses:
+
+```bash
+python scripts/upgrade_schema.py
+python scripts/process_final_prospectuses.py
+python scripts/process_final_prospectuses.py --limit 25
+python scripts/process_final_prospectuses.py --ipo-id 123 --reparse
+python scripts/process_final_prospectuses.py --ipo-id 123 --refetch --reparse
+```
+
+The upgrade adds `primary_shares`, `secondary_shares`, and `shares_outstanding_post_ipo`, plus the
+`filing_documents` and `ipo_facts` tables; it preserves existing rows and is safe to rerun. The default
+processor reuses successful downloads and facts. `--reparse` reruns the current parser against cached
+text without downloading; `--refetch` explicitly downloads again and refreshes normalized text. A failed
+document is recorded without aborting the batch.
+
+### Prospectus cache
+
+`FILING_CACHE_DIR` defaults to `./data/filings`. Each filing uses
+`<CIK>/<ACCESSION>/raw.html` and `<CIK>/<ACCESSION>/text.txt`. Raw bytes are retained, their SHA-256 and
+byte size are stored with queryable HTTP/source/error/UTC timestamp metadata, and normalized UTF-8 text
+removes scripts and styles, decodes entities, preserves useful line separation, and collapses excessive
+whitespace. Cache files are gitignored. Normalization uses the `beautifulsoup4` dependency; there is no
+OCR, AI, or LLM dependency.
+
+### Provenance, confidence, and promotion
+
+`ipo_facts` records the IPO and source filing, typed value, unit, confidence, stable parser name/version,
+short excerpt/location, and direct or derived status. Exact duplicate identity is IPO + filing + field +
+parser name/version + canonical value key, so reruns do not duplicate facts while earlier parser versions
+remain available.
+
+The single canonical promotion threshold is **0.90**. Facts below it remain available without changing
+canonical IPO data. Only facts from `final_prospectus_filing_id` qualify. Distinct high-confidence values
+for the same field are reported as ambiguous and leave the canonical field unchanged. Unchanged values
+are not rewritten. When canonical price and offered shares exist, deal size is recorded as a derived fact
+(`ipo_price * shares_offered`) using the lower input confidence.
+
+### Parsed fields and limitations
+
+Parser `final_prospectus_offering` version `1` attempts only `ipo_price`, `shares_offered`,
+`primary_shares`, `secondary_shares`, `shares_outstanding_post_ipo`, and derived `deal_size`. It prioritizes
+explicit cover/summary language and avoids authorized, option-plan, over-allotment, historical-financing,
+pre-offering, fully diluted, option, and warrant counts. Ambiguous language is intentionally unpromoted.
+
+This milestone does not parse lockups, underwriters, financial statements, use of proceeds, market data,
+or options, and does not reconstruct complex tables or perform OCR.
+
+The list API exposes canonical offering values and compact cache/fact counts. The detail API also exposes
+concise fact provenance. The dashboard shows price, offered shares, derived deal size, and parsed status.
 
 ## 7. Start the web application
 
@@ -280,9 +335,8 @@ http://localhost:8007/docs
 - `GET /api/ipos/{id}`
 - `POST /api/ingest/sec?days=365`
 
-IPO list/detail responses include classification fields and a `final_prospectus` object (including
-its clickable SEC URL) when associated. The dashboard shows Type, Offering status, and
-Classification without changing the underlying research workflow.
+IPO list/detail responses include classification and canonical offering fields, a `final_prospectus`
+object, cache metadata, and fact counts. Detail responses add compact provenance facts.
 
 ## Testing
 
@@ -395,12 +449,10 @@ requirements-dev.txt
 docker-compose.yml
 ```
 
-## Immediate next milestone
+## Later milestones
 
-Parse final-prospectus fields such as IPO price and shares offered. That parsing, market/options
-data, scoring, and trading logic are explicitly outside Milestone 2.
-Later work can store source/confidence metadata for parsed fields, add market/options providers after
-the dataset is reliable, and build scoring and backtesting before considering trade execution.
+Market/options providers, scoring, and backtesting remain future work after the provenance-backed
+prospectus dataset is evaluated. Trading execution is not implemented.
 
 ## SEC fair-access note
 
