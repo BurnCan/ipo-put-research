@@ -821,10 +821,75 @@ requirements-dev.txt
 docker-compose.yml
 ```
 
+## Milestone 7: point-in-time lockup backtesting
+
+M7 provides **point-in-time exploratory backtesting of pre-lockup signals** using only
+the stored M6 snapshots and outcomes.  The canonical dataset unit is one selected
+primary lockup × observation offset. Multiple offsets from the same lockup are
+repeated observations, not independent IPO events; row counts must never be read as
+independent-event counts.
+
+The default clean research cohort is classified, priced operating-company IPOs with
+a selected primary lockup and expiration date. Export it deterministically with:
+
+```bash
+python scripts/export_lockup_backtest.py
+```
+
+The default file is `data/backtests/lockup_signal_outcomes.csv`; `--output`, cohort
+filters, ticker/IPO filters, and `--limit` are available. Filters are applied before
+the limit. Missing values remain missing, and each outcome horizon uses its maximum
+valid sample (for example, +5 does not require a mature +40 outcome).
+
+Compare a feature separately across the standard offsets:
+
+```bash
+python scripts/analyze_lockup_backtest.py \
+  --feature return_20d \
+  --outcome post_20d_return
+```
+
+Or inspect a single offset:
+
+```bash
+python scripts/analyze_lockup_backtest.py \
+  --feature return_20d \
+  --outcome post_20d_return \
+  --offset -10
+```
+
+JSON reports contain per-offset descriptive returns, fixed bearish thresholds,
+Spearman rank correlation, and median-split groups (including stored M6 bearish
+MFE/MAE where the chosen horizon exists). `--persistence` adds a deterministic sign
+path summary at -20/-10/-5/-1. Feature names are restricted to an explicit pre-event
+allowlist, separate from the retrospective outcome allowlist. No offsets are pooled
+for a naïve significance test.
+
+P-values are exploratory: the historical event sample is small and many features,
+horizons, and offsets may be inspected. M7 does not prove a trading edge, account for
+options pricing, benchmark-adjust raw stock returns, optimize thresholds, or provide
+trade recommendations. It also does not require incomplete unlock-supply fields;
+benchmark adjustment and better locked-share coverage are possible future work.
+
+```text
+SEC discovery/enrichment
+        ↓
+classification
+        ↓
+prospectus extraction
+        ↓
+primary lockup extraction
+        ↓
+market history
+        ↓
+M6 point-in-time snapshots/outcomes
+        ↓
+M7 backtest dataset + signal analysis
+```
+
 ## Later milestones
 
-Market/options providers, scoring, and backtesting remain future work after the provenance-backed
-prospectus dataset is evaluated. Trading execution is not implemented.
+Options backtesting, benchmark adjustment, scoring, and trading execution are not implemented.
 
 ## SEC fair-access note
 
