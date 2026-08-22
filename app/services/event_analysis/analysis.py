@@ -110,19 +110,39 @@ def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None =
     return report
 
 
-def recompute_lockup_analyses(db, *, limit=None, ipo_id=None, lockup_id=None, ticker=None, recompute=False):
-    """Analyze stored data only. ``recompute`` is accepted for CLI/API symmetry;
-    versioned rows are deterministically refreshed on every run regardless."""
+def recompute_lockup_analyses(db, *, limit=None, ipo_id=None, lockup_id=None, ticker=None,
+                              classification_status=None, candidate_type=None,
+                              offering_status=None, primary_lockup_only=False,
+                              recompute=False):
+    """Analyze stored data only.
+
+    An explicit ``lockup_id`` overrides both primary-lockup selection and research-universe
+    filters. Otherwise filters compose and the selected primary lockup remains the target.
+    ``recompute`` is accepted for CLI/API symmetry; versioned rows are deterministically
+    refreshed on every run regardless.
+    """
     report = AnalysisReport()
     stmt = select(IPOLockup, IPO).join(IPO, IPO.id == IPOLockup.ipo_id).join(Company, Company.id == IPO.company_id)
     if lockup_id is not None:
         stmt = stmt.where(IPOLockup.id == lockup_id)
     else:
         stmt = stmt.where(IPOLockup.id == IPO.primary_lockup_id)
+        if classification_status is not None:
+            stmt = stmt.where(IPO.classification_status == classification_status)
+        if candidate_type is not None:
+            stmt = stmt.where(IPO.candidate_type == candidate_type)
+        if offering_status is not None:
+            stmt = stmt.where(IPO.offering_status == offering_status)
+        if primary_lockup_only:
+            stmt = stmt.where(
+                IPO.primary_lockup_id.is_not(None),
+                IPO.primary_lockup_expiration_date.is_not(None),
+            )
     if ipo_id is not None: stmt = stmt.where(IPO.id == ipo_id)
     if ticker: stmt = stmt.where(Company.ticker.ilike(ticker.strip()))
+    stmt = stmt.order_by(IPO.id, IPOLockup.id)
     if limit is not None: stmt = stmt.limit(limit)
-    rows = db.execute(stmt.order_by(IPO.id)).all()
+    rows = db.execute(stmt).all()
     report.ipos_seen = len({ipo.id for _, ipo in rows})
     report.lockups_seen = len(rows)
     for lockup, _ in rows:

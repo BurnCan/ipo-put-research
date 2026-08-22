@@ -97,6 +97,47 @@ python scripts/analyze_lockup_events.py --ipo-id 14 --recompute
 python scripts/analyze_lockup_events.py --lockup-id 11
 ```
 
+To keep Milestone 6 aligned with the research cohort used by the upstream pipeline, run:
+
+```bash
+python scripts/analyze_lockup_events.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only
+```
+
+For staged execution, apply a limit after the cohort filters:
+
+```bash
+python scripts/analyze_lockup_events.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only \
+  --limit 25
+```
+
+This preserves one consistent downstream research universe:
+
+```text
+classified priced operating IPO
+        ↓
+final prospectus
+        ↓
+selected dated primary lockup
+        ↓
+market history
+        ↓
+M6 pre-event snapshots + event outcomes
+```
+
+The value filters compose, and `--primary-lockup-only` requires both a selected primary lockup and
+its stored primary expiration date. Filters are applied before deterministic ordering and `--limit`.
+An explicit `--lockup-id` overrides cohort filtering and primary selection so any extracted lockup,
+including a non-primary one, remains directly analyzable. M6 reads only stored database data and
+remains entirely offline; it does not call Massive, the SEC, or another external service.
+
 IPO JSON includes compact `primary_lockup_event` data, and
 `GET /api/ipos/{id}/lockup-snapshots` returns its ordered trajectory. The dashboard shows the lockup
 status and selected pre/post measurements. This milestone intentionally defers benchmark/sector
