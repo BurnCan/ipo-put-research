@@ -47,7 +47,20 @@ def upgrade_milestone_3(engine: Engine) -> list[str]:
 
 
 def upgrade_schema(engine: Engine) -> list[str]:
-    return upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine) + upgrade_milestone_5(engine)
+    return (upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine)
+            + upgrade_milestone_5(engine) + upgrade_milestone_6(engine))
+
+
+def upgrade_milestone_6(engine: Engine) -> list[str]:
+    """Create recomputable lockup snapshot and outcome tables safely."""
+    from app.models import LockupEventAnalysis, LockupSignalSnapshot
+    changed = []
+    existing = set(inspect(engine).get_table_names())
+    for table in (LockupSignalSnapshot.__table__, LockupEventAnalysis.__table__):
+        if table.name not in existing:
+            table.create(engine, checkfirst=True)
+            changed.append(table.name)
+    return changed
 
 
 def upgrade_milestone_5(engine: Engine) -> list[str]:

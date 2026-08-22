@@ -19,12 +19,90 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 ## Research pipeline
 
 ```text
-SEC candidate discovery → SEC submissions enrichment → candidate classification
-  → final prospectus association → prospectus extraction → lockup extraction
-  → market-history ingestion → market summary metrics
+SEC candidate discovery
+  → SEC enrichment
+  → classification
+  → prospectus extraction
+  → lockup extraction
+  → market-history ingestion
+  → pre-event signal snapshots
+  → event/post-event outcomes
+  → future backtesting / signal research
 ```
 
-Milestone 5 adds the market-behavior layer. Options, composite scoring, and trading remain out of scope.
+Milestone 6 adds a descriptive, backtest-ready lockup-event layer. Options, composite scoring,
+recommendations, and trading remain out of scope.
+
+## Lockup event analysis (Milestone 6)
+
+Analysis is stored as recomputable derived state; raw `daily_prices` remain authoritative. The default
+target is each IPO's `primary_lockup_id`, while `--lockup-id` permits research on any extracted
+agreement. Snapshot and outcome formulas have independent explicit version `1` identifiers.
+
+### Sessions, dates, and point-in-time integrity
+
+The source `event_date` prefers the stated expiration and otherwise uses the calculated expiration.
+It is preserved separately from `event_trade_date`, the **first stored trading session on or after**
+that date. Thus a weekend or holiday moves to the following available session, never the preceding
+one. If no on-or-after bar exists, `event_trade_date` remains null.
+
+Snapshots are row-oriented observations at `-60, -40, -20, -10, -5, -1` trading sessions. Outcomes
+use exact session offsets `0, +1, +5, +10, +20, +40`. For every snapshot,
+`data_cutoff_date = observation_date`, and its price-history query requires that cutoff and filters
+out every later bar. This is an enforced guardrail against look-ahead bias, not merely metadata.
+An observation row is still created with short history, but an exact unavailable window remains
+null rather than being relabeled (for example, 17 sessions never becomes a 20-session return).
+
+For prospective events without a stored event session, weekday projection is used only to identify
+an eligible pre-event observation that must match an actual stored bar. It is not persisted as an
+exchange session or as `event_trade_date`; exchange holidays are a known limitation until a market
+calendar is introduced.
+
+### Snapshot measurements
+
+Snapshot rows copy stable offering structure (IPO price, primary/secondary/total offered shares and
+deal size) and derive the secondary fraction without greenshoe shares. They include calendar/session
+age, exact trailing returns, as-of high and low, drawdown, range position, and IPO-gain retention.
+Liquidity features include exact 5/20/40-session volume averages, 5-to-20 volume ratio, and average
+dollar volume using `close * volume`. Up/down days compare close with the preceding session; flat
+days are excluded and a missing side produces a null ratio.
+
+Realized volatility is the **sample** standard deviation of exactly N close-to-close returns,
+annualized as `stdev * sqrt(252)`. Daily range is `(high - low) / previous_close`, averaged across
+exactly 20 sessions. Long-window values remain null until their complete input history exists.
+
+### Event outcomes and incomplete windows
+
+Event measurements preserve the previous close and event OHLCV. Gap, intraday, and close returns
+are respectively `open / previous_close - 1`, `close / open - 1`, and
+`close / previous_close - 1`. Pre-event convenience returns compare event close with exact negative
+offset closes; post-event returns compare exact positive-offset closes with event close.
+
+Bearish MFE is `(event_close - minimum post-event low) / event_close`; bearish MAE is
+`(maximum post-event high - event_close) / event_close`. Both are non-negative excursions from a
+bearish/short perspective and use daily lows/highs, not closes. Volume response uses the complete
+15-session baseline `-20` through `-6`, deliberately excluding the immediate pre-event week.
+
+Upcoming events have null future outcomes. An observed event with no `+1` is `event_today`, partial
+future history is `post_event_incomplete`, and at least 40 post-event sessions is `complete`.
+`max_post_event_session_available` explicitly describes completeness. Idempotent reruns update the
+same versioned rows, so newly ingested bars progressively fill outcomes without duplicating data.
+
+Run the schema upgrade and entirely offline analysis from the repository root:
+
+```bash
+python scripts/upgrade_schema.py
+python scripts/analyze_lockup_events.py --limit 25
+python scripts/analyze_lockup_events.py --ticker ALH
+python scripts/analyze_lockup_events.py --ipo-id 14 --recompute
+python scripts/analyze_lockup_events.py --lockup-id 11
+```
+
+IPO JSON includes compact `primary_lockup_event` data, and
+`GET /api/ipos/{id}/lockup-snapshots` returns its ordered trajectory. The dashboard shows the lockup
+status and selected pre/post measurements. This milestone intentionally defers benchmark/sector
+adjustment, ownership and insider data, fundamentals and valuation, options and implied volatility,
+put profitability, simulations, scoring/rankings, causal labels, alerts, and execution.
 
 ## Recommended environment
 
