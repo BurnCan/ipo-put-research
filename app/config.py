@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     filing_cache_dir: str = "./data/filings"
     market_data_provider: str = "massive"
     massive_api_key: str | None = None
+    market_initial_lookback_days: int = 730
+    market_refresh_days: int = 30
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

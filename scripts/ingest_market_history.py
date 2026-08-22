@@ -16,12 +16,20 @@ def main() -> None:
     parser.add_argument("--ipo-id", type=int)
     parser.add_argument("--ticker")
     parser.add_argument("--sleep", type=float, default=12.0, help="Seconds between provider requests")
-    parser.add_argument("--refresh", action="store_true", help="Refetch and upsert the initial history range")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="Refetch and upsert only the recent correction window (default: MARKET_REFRESH_DAYS)",
+    )
+    parser.add_argument(
+        "--refresh-days", type=int,
+        help="Number of calendar days re-fetched by --refresh (overrides MARKET_REFRESH_DAYS)",
+    )
     args = parser.parse_args()
     provider = create_provider()
     with SessionLocal() as db:
         report = ingest_market_history(db, provider, limit=args.limit, ipo_id=args.ipo_id,
-                                       ticker=args.ticker, sleep_seconds=args.sleep, refresh=args.refresh)
+                                       ticker=args.ticker, sleep_seconds=args.sleep, refresh=args.refresh,
+                                       refresh_days=args.refresh_days)
     print(report.to_dict())
 
 

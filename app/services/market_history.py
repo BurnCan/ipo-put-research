@@ -53,7 +53,9 @@ def initialize_primary_security(db: Session, company: Company) -> tuple[Security
 
 def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: int | None = None,
                           ipo_id: int | None = None, ticker: str | None = None, sleep_seconds: float = 0,
-                          refresh: bool = False, end_date: date | None = None) -> MarketIngestReport:
+                          refresh: bool = False, refresh_days: int | None = None,
+                          initial_lookback_days: int | None = None,
+                          end_date: date | None = None) -> MarketIngestReport:
     report = MarketIngestReport()
     stmt = select(IPO, Company).join(Company, Company.id == IPO.company_id).order_by(
         (IPO.offering_status == "priced").desc(), IPO.first_filing_date.desc()
@@ -66,6 +68,11 @@ def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: i
         stmt = stmt.limit(limit)
     rows = db.execute(stmt).all()
     effective_end = end_date or (date.today() - timedelta(days=1))
+    lookback_days = (initial_lookback_days if initial_lookback_days is not None
+                     else settings.market_initial_lookback_days)
+    recent_days = refresh_days if refresh_days is not None else settings.market_refresh_days
+    if lookback_days < 1 or recent_days < 1:
+        raise ValueError("market history lookback and refresh windows must be positive")
     requested = False
     for ipo, company in rows:
         report.securities_seen += 1
@@ -80,9 +87,14 @@ def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: i
         latest = db.scalar(select(func.max(DailyPrice.trade_date)).where(
             DailyPrice.security_id == security.id, DailyPrice.provider == provider.name
         ))
-        fallback = date.today() - timedelta(days=730)
-        initial_start = ipo.ipo_date or ipo.first_filing_date or fallback
-        start = initial_start if refresh or latest is None else latest + timedelta(days=1)
+        # A registration filing can precede trading by months or never lead to an
+        # IPO, so it is deliberately not a market-history anchor.
+        fallback = effective_end - timedelta(days=lookback_days - 1)
+        initial_start = ipo.ipo_date or fallback
+        if refresh:
+            start = max(initial_start, effective_end - timedelta(days=recent_days - 1))
+        else:
+            start = initial_start if latest is None else latest + timedelta(days=1)
         if start > effective_end:
             report.skipped_current += 1
             continue
