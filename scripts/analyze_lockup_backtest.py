@@ -7,20 +7,31 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 
 from app.db import SessionLocal
-from app.services.backtest import analyze_feature, build_backtest_dataset, classify_signal_persistence
+from app.services.backtest import (analyze_feature, analyze_two_feature_interaction,
+                                   build_backtest_dataset, classify_signal_persistence)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Per-offset exploratory M7 signal analysis.")
     parser.add_argument("--feature", default="return_20d")
+    parser.add_argument("--second-feature")
     parser.add_argument("--outcome", default="post_20d_return")
     parser.add_argument("--offset", type=int)
     parser.add_argument("--persistence", action="store_true")
+    parser.add_argument("--interaction", action="store_true")
     parser.add_argument("--ticker")
     parser.add_argument("--ipo-id", type=int)
     args = parser.parse_args()
+    if args.interaction and not args.second_feature:
+        parser.error("--interaction requires --second-feature")
+    if args.interaction and args.offset is None:
+        parser.error("--interaction requires an explicit --offset")
     with SessionLocal() as db: rows = build_backtest_dataset(db, ticker=args.ticker, ipo_id=args.ipo_id)
-    report = analyze_feature(rows, args.feature, args.outcome, args.offset)
+    if args.interaction:
+        report = analyze_two_feature_interaction(
+            rows, args.feature, args.second_feature, args.outcome, args.offset)
+    else:
+        report = analyze_feature(rows, args.feature, args.outcome, args.offset)
     if args.persistence: report["persistence"] = classify_signal_persistence(rows, args.feature)
     print(json.dumps(report, indent=2, sort_keys=True))
 
