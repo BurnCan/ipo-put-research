@@ -78,8 +78,9 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, classification_statu
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
-        # Old M6 observations belong to discovery, never prospective.
-        if existing is None and snapshot is not None and snapshot.observation_date < spec.prospective_start_date:
+        # Observations through the hypothesis freeze date belong to discovery,
+        # never prospective; only strictly later snapshots are out-of-sample.
+        if existing is None and snapshot is not None and snapshot.observation_date <= spec.prospective_start_date:
             report.unavailable += 1; continue
         if existing is None and (snapshot is None or getattr(snapshot, spec.feature1) is None or
                                  getattr(snapshot, spec.feature2) is None):

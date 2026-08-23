@@ -14,7 +14,12 @@ STANDARD_OFFSETS = (-60, -40, -20, -10, -5, -1)
 
 @dataclass(frozen=True)
 class FrozenHypothesis:
-    """Stable, non-database identity for a prospectively testable hypothesis."""
+    """Stable, non-database identity for a prospectively testable hypothesis.
+
+    ``prospective_start_date`` is the inclusive historical cutoff (the date the
+    hypothesis was frozen), not the first observation date admitted to M8.
+    Prospective observations must be strictly later than this date.
+    """
     feature1: str
     feature2: str
     outcome: str

@@ -969,8 +969,11 @@ python scripts/update_prospective_signals.py \
 Dry-run reports pending work without database writes. Normal runs permanently
 copy the first eligible M6 `-5` snapshot, classify equality as low, and never
 refresh those signal fields. A later run may attach the stored M6 +20 outcome
-without changing the original classification. Events before the explicit
-2026-08-23 prospective start date are excluded rather than backfilled.
+without changing the original classification. The field named
+`prospective_start_date` is the hypothesis freeze/cutoff date, not the first
+date admitted to evaluation. Observations on or before the 2026-08-23 cutoff
+are historical and excluded rather than backfilled; only observations strictly
+after the cutoff are eligible for prospective evaluation.
 
 Evaluate genuine prospective rows only:
 
