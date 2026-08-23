@@ -126,20 +126,44 @@ def get_upcoming_lockups(db, *, today=None):
 
 
 def get_research_summary(db):
-    upcoming = get_upcoming_lockups(db)
-    signals = get_prospective_signal_rows(db)
-    eligible_lockups = len(_cohort(db))
-    missed = sum(r["m8_status"] == "unavailable" for r in upcoming)
+    spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
+    categories = {"historical_unavailable": 0, "missed_t5_window": 0,
+                  "pending_observation": 0, "prospective_signals": 0}
+    prospective_rows = []
+    cohort = _cohort(db)
+    for lockup, _ipo, _company in cohort:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.hypothesis_id == HYPOTHESIS_ID,
+            LockupProspectiveSignal.hypothesis_version == spec.analysis_version,
+            LockupProspectiveSignal.lockup_id == lockup.id))
+        snapshot = db.scalar(select(LockupSignalSnapshot).where(
+            LockupSignalSnapshot.lockup_id == lockup.id,
+            LockupSignalSnapshot.observation_offset == spec.observation_offset,
+            LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION)
+            .order_by(LockupSignalSnapshot.id))
+        # These four categories partition the clean cohort. Matured is a subset
+        # of prospective_signals, rather than another cohort bucket.
+        if signal is not None and signal.evaluation_mode == "prospective":
+            categories["prospective_signals"] += 1
+            prospective_rows.append(signal)
+        elif (signal is not None and signal.evaluation_mode == "lifecycle_tracking" and
+              signal.signal_status == "unavailable"):
+            categories["missed_t5_window"] += 1
+        elif (signal is None and snapshot is not None and
+              snapshot.observation_date <= spec.prospective_start_date):
+            categories["historical_unavailable"] += 1
+        else:
+            categories["pending_observation"] += 1
+
+    eligible_lockups = len(cohort)
     return {"eligible_lockups": eligible_lockups,
-            "historical_unavailable": eligible_lockups - len(upcoming),
-            "missed_t5_window": missed,
-            "pending_observation": sum(r["m8_status"] == "pending_observation" for r in upcoming),
-            "prospective_signals": len(signals),
-            "awaiting_event": sum(r["signal_status"] == "awaiting_event" for r in signals),
-            "awaiting_outcome": sum(r["signal_status"] == "awaiting_outcome" for r in signals),
-            "matured_signals": sum(r["signal_status"] == "matured" for r in signals),
-            "high_high_signals": sum(r["is_high_high"] for r in signals),
-            "high_high_matured": sum(r["is_high_high"] and r["signal_status"] == "matured" for r in signals),
+            **categories,
+            "awaiting_event": sum(r.signal_status == "awaiting_event" for r in prospective_rows),
+            "awaiting_outcome": sum(r.signal_status == "awaiting_outcome" for r in prospective_rows),
+            "matured_signals": sum(r.signal_status == "matured" for r in prospective_rows),
+            "high_high_signals": sum(r.is_high_high for r in prospective_rows),
+            "high_high_matured": sum(r.is_high_high and r.signal_status == "matured"
+                                     for r in prospective_rows),
             "latest_market_date": db.scalar(select(func.max(DailyPrice.trade_date)))}
 
 

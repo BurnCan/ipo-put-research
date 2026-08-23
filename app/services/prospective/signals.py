@@ -94,6 +94,19 @@ def _unavailable_row(spec, hypothesis_id, ipo, lockup, event_date,
         evaluation_mode="lifecycle_tracking")
 
 
+def _existing_lifecycle_row(db, hypothesis_id, hypothesis_version, lockup_id):
+    """Find the one M8 row allowed by the hypothesis/lockup identity.
+
+    Deliberately do not filter by evaluation_mode here: both genuine prospective
+    evidence and permanent lifecycle-tracking unavailability occupy the same
+    unique identity and must be authoritative on subsequent updater runs.
+    """
+    return db.scalar(select(LockupProspectiveSignal).where(
+        LockupProspectiveSignal.hypothesis_id == hypothesis_id,
+        LockupProspectiveSignal.hypothesis_version == hypothesis_version,
+        LockupProspectiveSignal.lockup_id == lockup_id))
+
+
 def update_prospective_lockup_signals(db, *, hypothesis_id, classification_status="classified",
                                       candidate_type="operating_company_ipo",
                                       offering_status="priced", primary_lockup_only=True,
@@ -121,17 +134,17 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, classification_statu
         event_date = _event_date(lockup)
         if event_date is None: report.unavailable += 1; continue
         report.eligible_events += 1
-        existing = db.scalar(select(LockupProspectiveSignal).where(
-            LockupProspectiveSignal.hypothesis_id == hypothesis_id,
-            LockupProspectiveSignal.hypothesis_version == spec.analysis_version,
-            LockupProspectiveSignal.lockup_id == lockup.id))
+        existing = _existing_lifecycle_row(
+            db, hypothesis_id, spec.analysis_version, lockup.id)
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
         # Any previously frozen prospective evidence wins over later lifecycle
         # reconstruction, including an older M6 snapshot.
-        if existing is not None and existing.signal_status == "unavailable":
+        if (existing is not None and
+                existing.evaluation_mode == "lifecycle_tracking" and
+                existing.signal_status == "unavailable"):
             report.unavailable += 1
             report.unavailable_observation_before_cutoff += int(
                 existing.unavailable_reason == OBSERVATION_BEFORE_PROSPECTIVE_START)
