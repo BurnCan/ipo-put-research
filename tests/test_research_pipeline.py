@@ -1,0 +1,146 @@
+import fcntl
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "update_research_pipeline.py"
+SPEC = importlib.util.spec_from_file_location("update_research_pipeline", SCRIPT)
+pipeline = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(pipeline)
+
+
+def test_success_order_results_timestamps_cohort_and_frozen_hypothesis(monkeypatch):
+    calls = []
+
+    def market():
+        calls.append("market")
+        return {"bars": 2}
+
+    def m6():
+        calls.append("m6")
+        return {"snapshots": 3}
+
+    def m8(**kwargs):
+        calls.append(("m8", kwargs))
+        return {"signals": 1}
+
+    report = pipeline.run_pipeline(market_stage=market, m6_stage=m6, m8_stage=m8)
+    assert report["status"] == "ok"
+    assert calls == ["market", "m6", ("m8", {"dry_run": False})]
+    assert report["started_at"].endswith("+00:00")
+    assert report["finished_at"].endswith("+00:00")
+    assert report["stages"]["market_history"]["result"] == {"bars": 2}
+    assert report["stages"]["m6_analysis"]["result"] == {"snapshots": 3}
+    assert report["stages"]["m8_prospective"]["result"] == {"signals": 1}
+    assert pipeline.FROZEN_HYPOTHESIS_ID == "m7_return20_vol20_minus5_post20"
+    assert pipeline.COHORT == {
+        "classification_status": "classified",
+        "candidate_type": "operating_company_ipo",
+        "offering_status": "priced",
+        "primary_lockup_only": True,
+    }
+
+
+@pytest.mark.parametrize("failed_stage", ["market", "m6"])
+def test_failure_is_fail_fast(failed_stage):
+    calls = []
+
+    def stage(name):
+        def operation():
+            calls.append(name)
+            if name == failed_stage:
+                raise RuntimeError("offline failure")
+            return {}
+        return operation
+
+    report = pipeline.run_pipeline(
+        market_stage=stage("market"), m6_stage=stage("m6"),
+        m8_stage=lambda **kwargs: calls.append("m8"),
+    )
+    assert report["status"] == "failed"
+    assert report["failed_stage"] == ("market_history" if failed_stage == "market" else "m6_analysis")
+    assert "m8" not in calls
+    assert report["finished_at"].endswith("+00:00")
+
+
+def test_main_exit_logging_parent_creation_dry_run_and_skips(tmp_path, monkeypatch, capsys):
+    seen = []
+
+    def fake_run(**kwargs):
+        seen.append(kwargs)
+        return {"status": "ok", "started_at": "a", "finished_at": "b", "stages": {
+            "market_history": {"status": "skipped"}, "m6_analysis": {"status": "skipped"},
+            "m8_prospective": {"status": "ok", "result": {}},
+        }}
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run)
+    log = tmp_path / "missing" / "daily.log"
+    lock = tmp_path / "pipeline.lock"
+    assert pipeline.main(["--dry-run", "--skip-market-history", "--skip-m6",
+                          "--log-file", str(log), "--lock-file", str(lock)]) == 0
+    assert seen[0]["dry_run"] is True
+    assert seen[0]["skip_market_history"] is True
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    assert json.loads(log.read_text())['status'] == "ok"
+    pipeline._append_log(log, {"status": "second"})
+    assert len(log.read_text().splitlines()) == 2
+
+
+def test_main_failed_status_has_nonzero_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "run_pipeline", lambda **kwargs: {
+        "status": "failed", "started_at": "a", "finished_at": "b", "stages": {},
+        "failed_stage": "market_history", "error": "failure",
+    })
+    assert pipeline.main(["--lock-file", str(tmp_path / "lock")]) == 1
+
+
+def test_lock_prevents_overlap_and_releases_after_success_and_exception(tmp_path):
+    lock = tmp_path / "lock"
+    with pipeline.pipeline_lock(lock):
+        with pytest.raises(pipeline.AlreadyRunningError):
+            with pipeline.pipeline_lock(lock):
+                pass
+    with pipeline.pipeline_lock(lock):
+        pass
+    with pytest.raises(RuntimeError):
+        with pipeline.pipeline_lock(lock):
+            raise RuntimeError("boom")
+    with pipeline.pipeline_lock(lock):
+        pass
+
+
+def test_already_running_main_status(tmp_path, capsys):
+    lock = tmp_path / "lock"
+    lock.touch()
+    with lock.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert pipeline.main(["--lock-file", str(lock)]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "already_running"
+
+
+def test_script_help_is_cwd_independent_and_noninteractive(tmp_path):
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"], cwd=tmp_path,
+        text=True, capture_output=True, timeout=10, check=False,
+    )
+    assert completed.returncode == 0
+    assert "--dry-run" in completed.stdout
+
+
+def test_skips_are_explicit_and_dry_run_reaches_only_m8():
+    calls = []
+    report = pipeline.run_pipeline(
+        dry_run=True, skip_market_history=True, skip_m6=True,
+        market_stage=lambda: calls.append("market"), m6_stage=lambda: calls.append("m6"),
+        m8_stage=lambda **kwargs: calls.append(kwargs) or {},
+    )
+    assert calls == [{"dry_run": True}]
+    assert report["stages"]["market_history"] == {"status": "skipped"}
+    assert report["stages"]["m6_analysis"] == {"status": "skipped"}

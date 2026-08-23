@@ -33,6 +33,81 @@ SEC candidate discovery
 Milestone 6 adds a descriptive, backtest-ready lockup-event layer. Options, composite scoring,
 recommendations, and trading remain out of scope.
 
+## Daily research pipeline
+
+The daily orchestration command keeps the prospective M8 dataset current as new market data
+arrives. It reuses the existing stage services and always runs the clean cohort (classified,
+priced, operating-company IPOs with a selected dated primary lockup) in this order:
+
+```text
+market-history ingestion
+        ↓
+M6 snapshots/outcomes
+        ↓
+M8 prospective signals/outcomes
+```
+
+This is how future T-5 signals and, once they mature, +20 outcomes become available for the frozen
+`m7_return20_vol20_minus5_post20` hypothesis. A failure stops the pipeline before any dependent
+stage. The command prints one JSON report and exits zero only after complete success:
+
+```bash
+python scripts/update_research_pipeline.py
+python scripts/update_research_pipeline.py \
+  --log-file logs/daily_pipeline.log
+```
+
+The log file is append-only and its parent directories are created automatically. A Linux/WSL
+`fcntl` lock at `data/update_research_pipeline.lock` prevents overlapping runs; an overlap reports
+`status: already_running` and exits non-zero. The optional `--skip-market-history`, `--skip-m6`, and
+`--skip-m8` flags explicitly mark stages as skipped and are intended only for debugging.
+
+`--dry-run` is **not** a full-pipeline no-write mode. Market ingestion and M6 have no native dry-run,
+so they execute their normal idempotent refreshes and may write database rows; only M8 receives
+`dry_run=True` and rolls back its prospective changes. This distinction is also stated in the
+command's help text.
+
+### Schedule daily with cron (Linux/WSL)
+
+The portable `scripts/run_daily_pipeline.sh` wrapper discovers its repository root, changes to it,
+activates `.venv`, and writes the structured report to `logs/daily_pipeline.log`. Make it executable:
+
+```bash
+chmod +x scripts/run_daily_pipeline.sh
+```
+
+Cron supplies a minimal environment, so use absolute paths in the crontab. For a checkout at
+`/home/weird/projects/ipo-put-research`, edit the schedule with `crontab -e` and add:
+
+```cron
+30 18 * * * /home/weird/projects/ipo-put-research/scripts/run_daily_pipeline.sh >> /home/weird/projects/ipo-put-research/logs/cron.log 2>&1
+```
+
+The five schedule fields are `minute hour day-of-month month day-of-week`; therefore
+`30 18 * * *` means every day at 18:30 in the cron daemon's **local timezone**. Running after the
+US market close, such as 6:30 PM Eastern when the cron environment is configured for Eastern time,
+is recommended. The Python command does not impose a timezone.
+
+Verify and troubleshoot without changing pipeline data:
+
+```bash
+crontab -l
+service cron status
+sudo service cron start
+tail -f logs/daily_pipeline.log
+tail -f logs/cron.log
+```
+
+Exact cron service management varies with the WSL/systemd setup. Cron inside WSL runs only while
+the WSL environment and its services are available. If Windows is shut down or sleeping, or WSL is
+not running in a way that keeps cron active, the job may not execute. Windows Task Scheduler is
+more reliable when Windows itself must start WSL; it can invoke (automation is not included here):
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -- bash -lc \
+  "/home/weird/projects/ipo-put-research/scripts/run_daily_pipeline.sh"
+```
+
 ## Lockup event analysis (Milestone 6)
 
 Analysis is stored as recomputable derived state; raw `daily_prices` remain authoritative. The default
