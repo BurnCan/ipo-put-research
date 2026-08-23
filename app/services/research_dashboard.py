@@ -16,6 +16,12 @@ HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
 
 
+def _classify_non_signaled(required_t5_date, today):
+    """Return the projected M8 lifecycle state before a signal is persisted."""
+    return ("pending_observation" if required_t5_date > today
+            else "waiting_for_market_data")
+
+
 def hypothesis_metadata(hypothesis_id=HYPOTHESIS_ID):
     """Serialize the registry entry without deriving or copying its parameters."""
     spec = FROZEN_HYPOTHESES[hypothesis_id]
@@ -102,10 +108,8 @@ def get_upcoming_lockups(db, *, today=None):
                             resolution.observation_session)
         if signal:
             status = signal.signal_status
-        elif required_t5_date > today:
-            status = "pending_observation"
         else:
-            status = "waiting_for_market_data"
+            status = _classify_non_signaled(required_t5_date, today)
         stored_t5_snapshot_date = snapshot.observation_date if snapshot else None
         t5_timing_status = ("observation_before_prospective_start"
                             if signal and signal.signal_status == "unavailable" else
@@ -145,7 +149,8 @@ def get_upcoming_lockups(db, *, today=None):
     return result
 
 
-def get_research_summary(db):
+def get_research_summary(db, *, today=None):
+    today = today or date.today()
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     categories = {"historical_unavailable": 0, "missed_t5_window": 0,
                   "pending_observation": 0, "waiting_for_market_data": 0,
@@ -178,8 +183,7 @@ def get_research_summary(db):
                           lockup.calculated_expiration_date)
             required = resolve_observation_session(
                 event_date, spec.observation_offset).observation_session
-            categories["pending_observation" if required > date.today()
-                       else "waiting_for_market_data"] += 1
+            categories[_classify_non_signaled(required, today)] += 1
 
     eligible_lockups = len(cohort)
     return {"eligible_lockups": eligible_lockups,

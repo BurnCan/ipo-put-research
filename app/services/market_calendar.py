@@ -12,6 +12,14 @@ import exchange_calendars
 
 CALENDAR_ID = "XNYS"
 CALENDAR_PROVIDER = "exchange_calendars"
+# Keep the research horizon independent of exchange_calendars' moving default
+# window.  This covers the project's historical data and prospective events.
+CALENDAR_START = date(1990, 1, 1)
+CALENDAR_END = date(2035, 12, 31)
+
+
+class MarketCalendarDateOutOfBounds(ValueError):
+    """Raised when a request falls outside the canonical research horizon."""
 
 
 @dataclass(frozen=True)
@@ -27,12 +35,21 @@ class SessionResolution:
 
 @lru_cache(maxsize=1)
 def _calendar():
-    return exchange_calendars.get_calendar(CALENDAR_ID)
+    return exchange_calendars.get_calendar(
+        CALENDAR_ID,
+        start=CALENDAR_START,
+        end=CALENDAR_END,
+    )
 
 
 def _day(value: date) -> date:
     if not isinstance(value, date):
         raise TypeError("market-calendar inputs must be datetime.date values")
+    if not CALENDAR_START <= value <= CALENDAR_END:
+        raise MarketCalendarDateOutOfBounds(
+            f"requested date {value} is outside {CALENDAR_ID} calendar range "
+            f"{CALENDAR_START} through {CALENDAR_END}"
+        )
     return value
 
 
