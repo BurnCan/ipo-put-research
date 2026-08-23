@@ -70,6 +70,108 @@ def _group(rows, feature, outcome):
     return result
 
 
+def _interaction_group(rows, feature1, feature2, outcome):
+    """Summarize one of the four predefined two-feature median cells."""
+    result = {
+        "n_events": len({r["lockup_id"] for r in rows}),
+        "n_observations": len(rows),
+        "feature1_median": _median([float(r[feature1]) for r in rows]),
+        "feature2_median": _median([float(r[feature2]) for r in rows]),
+        **_outcome_stats(rows, outcome),
+    }
+    suffix = outcome.removeprefix("post_").removesuffix("_return")
+    for kind in ("mfe", "mae"):
+        column = f"bearish_{kind}_{suffix}"
+        values = [float(r[column]) for r in rows if r.get(column) is not None]
+        result[f"median_bearish_{kind}"] = _median(values)
+    return result
+
+
+def _coefficient_sign(value):
+    if value is None: return None
+    return "positive" if value > 0 else "negative" if value < 0 else "zero"
+
+
+def _ols_two_feature(rows, feature1, feature2, outcome):
+    """Fit intercept plus two slopes through centered cross-products.
+
+    The two-by-two solve is equivalent to ordinary least squares.  Scaling the
+    singularity tolerance to the covariance matrix avoids silently returning
+    unstable coefficients for constant or nearly collinear inputs.
+    """
+    n = len(rows)
+    empty = {"n": n, "status": "insufficient_sample" if n < 4 else "singular_design",
+             "intercept": None, "feature1_coefficient": None,
+             "feature2_coefficient": None, "feature1_coefficient_sign": None,
+             "feature2_coefficient_sign": None, "r_squared": None,
+             "standardized_beta_feature1": None, "standardized_beta_feature2": None}
+    if n < 4: return empty
+    x1 = [float(r[feature1]) for r in rows]
+    x2 = [float(r[feature2]) for r in rows]
+    y = [float(r[outcome]) for r in rows]
+    m1, m2, my = _mean(x1), _mean(x2), _mean(y)
+    c1, c2, cy = ([v - mean for v in values]
+                  for values, mean in ((x1, m1), (x2, m2), (y, my)))
+    s11, s22 = sum(v*v for v in c1), sum(v*v for v in c2)
+    s12 = sum(a*b for a, b in zip(c1, c2))
+    det = s11*s22 - s12*s12
+    scale = max(s11*s22, s12*s12)
+    if s11 == 0 or s22 == 0 or abs(det) <= 1e-12 * scale: return empty
+    s1y, s2y = sum(a*b for a, b in zip(c1, cy)), sum(a*b for a, b in zip(c2, cy))
+    b1 = (s1y*s22 - s2y*s12) / det
+    b2 = (s2y*s11 - s1y*s12) / det
+    intercept = my - b1*m1 - b2*m2
+    residual_ss = sum((actual - (intercept + b1*a + b2*b))**2
+                      for a, b, actual in zip(x1, x2, y))
+    total_ss = sum(v*v for v in cy)
+    r_squared = None if total_ss == 0 else max(0.0, 1 - residual_ss / total_ss)
+    sy = math.sqrt(total_ss / n) if total_ss else 0.0
+    return {"n": n, "status": "ok" if total_ss else "constant_outcome",
+            "intercept": intercept, "feature1_coefficient": b1,
+            "feature2_coefficient": b2,
+            "feature1_coefficient_sign": _coefficient_sign(b1),
+            "feature2_coefficient_sign": _coefficient_sign(b2), "r_squared": r_squared,
+            "standardized_beta_feature1": b1 * math.sqrt(s11 / n) / sy if sy else None,
+            "standardized_beta_feature2": b2 * math.sqrt(s22 / n) / sy if sy else None}
+
+
+def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset):
+    """Run one explicitly requested two-feature analysis at one offset."""
+    if feature1 not in FEATURE_COLUMNS:
+        raise ValueError(f"not an allowed pre-event feature: {feature1}")
+    if feature2 not in FEATURE_COLUMNS:
+        raise ValueError(f"not an allowed pre-event feature: {feature2}")
+    if outcome not in OUTCOME_COLUMNS:
+        raise ValueError(f"not an allowed retrospective outcome: {outcome}")
+    if offset is None: raise ValueError("two-feature interaction requires an explicit offset")
+    input_rows = [r for r in rows if r.get("observation_offset") == offset]
+    # Dataset rows are already unique, but retain only the first occurrence so a
+    # lockup can never be weighted twice if callers supply ad-hoc input.
+    unique = {}
+    for row in input_rows: unique.setdefault(row["lockup_id"], row)
+    valid = [r for r in unique.values() if r.get(feature1) is not None and
+             r.get(feature2) is not None and r.get(outcome) is not None]
+    values1, values2 = ([float(r[name]) for r in valid] for name in (feature1, feature2))
+    median1, median2 = _median(values1), _median(values2)
+    cells = {name: [] for name in ("low_low", "low_high", "high_low", "high_high")}
+    if median1 is not None:
+        for row in valid:
+            side1 = "low" if float(row[feature1]) <= median1 else "high"
+            side2 = "low" if float(row[feature2]) <= median2 else "high"
+            cells[f"{side1}_{side2}"].append(row)
+    return {"analysis_type": "two_feature_interaction", "feature1": feature1,
+            "feature2": feature2, "outcome": outcome, "observation_offset": offset,
+            "n_input_rows": len(input_rows), "n_valid_rows": len(valid),
+            "n_excluded_missing": len(unique) - len(valid),
+            "n_events": len(valid), "n_observations": len(valid),
+            "feature1_median": median1, "feature2_median": median2,
+            "groups": {name: _interaction_group(group, feature1, feature2, outcome)
+                       for name, group in cells.items()},
+            "ols": _ols_two_feature(valid, feature1, feature2, outcome),
+            "repeated_measures_by_lockup": True, "p_values_are_exploratory": True,
+            "small_sample_warning": True}
+
+
 def analyze_offset(rows, feature, outcome, offset):
     valid = [r for r in rows if r.get("observation_offset") == offset and
              r.get(feature) is not None and r.get(outcome) is not None]

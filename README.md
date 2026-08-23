@@ -865,6 +865,32 @@ path summary at -20/-10/-5/-1. Feature names are restricted to an explicit pre-e
 allowlist, separate from the retrospective outcome allowlist. No offsets are pooled
 for a naïve significance test.
 
+### Controlled two-feature interaction
+
+M7 can also test one explicitly preselected feature pair at one explicit observation
+offset. For the predefined momentum/volatility question, run:
+
+```bash
+python scripts/analyze_lockup_backtest.py \
+  --feature return_20d \
+  --second-feature realized_vol_20d \
+  --outcome post_20d_return \
+  --offset -5 \
+  --interaction
+```
+
+These two features were chosen before running this analysis. Complete cases are split
+into four groups using each feature's analysis-sample median: low is less than or
+equal to the median and high is greater than the median. No threshold optimization,
+feature-pair search, or offset search is performed. The same complete cases feed an
+exploratory OLS regression with an intercept, `outcome ~ feature1 + feature2`; singular,
+degenerate, and too-small samples are reported without fitting unstable coefficients.
+
+The current event sample is small, and the regression does not establish an
+independent trading edge. It is only intended to test whether one signal remains
+informative after accounting for another. Its group summaries and regression use
+stored M6 features and outcomes only and do not create a score or recommendation.
+
 P-values are exploratory: the historical event sample is small and many features,
 horizons, and offsets may be inspected. M7 does not prove a trading edge, account for
 options pricing, benchmark-adjust raw stock returns, optimize thresholds, or provide
