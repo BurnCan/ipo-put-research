@@ -12,7 +12,9 @@ def evaluate_prospective_signals(db, *, hypothesis_id):
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
     rows = list(db.scalars(select(LockupProspectiveSignal).where(
         LockupProspectiveSignal.hypothesis_id == hypothesis_id,
-        LockupProspectiveSignal.evaluation_mode == "prospective").order_by(LockupProspectiveSignal.id)))
+        LockupProspectiveSignal.evaluation_mode == "prospective",
+        LockupProspectiveSignal.signal_status != "unavailable"
+    ).order_by(LockupProspectiveSignal.id)))
     matured = [r for r in rows if r.realized_outcome_value is not None]
     groups = {}
     for name in GROUPS:

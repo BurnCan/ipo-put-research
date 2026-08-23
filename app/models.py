@@ -360,6 +360,7 @@ class LockupProspectiveSignal(Base):
     interaction_group: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_high_high: Mapped[bool] = mapped_column(Boolean, default=False)
     signal_status: Mapped[str] = mapped_column(String(32), index=True)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     evaluation_mode: Mapped[str] = mapped_column(String(24), default="prospective", index=True)
     realized_outcome_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
     realized_outcome_value: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)

@@ -52,12 +52,20 @@ def upgrade_schema(engine: Engine) -> list[str]:
 
 
 def upgrade_milestone_8(engine: Engine) -> list[str]:
-    """Create the append-only prospective validation table."""
+    """Create or narrowly extend the append-only prospective validation table."""
     from app.models import LockupProspectiveSignal
-    if LockupProspectiveSignal.__tablename__ in set(inspect(engine).get_table_names()):
+    table = LockupProspectiveSignal.__tablename__
+    if table not in set(inspect(engine).get_table_names()):
+        LockupProspectiveSignal.__table__.create(engine, checkfirst=True)
+        return [table]
+    existing = {column["name"] for column in inspect(engine).get_columns(table)}
+    if "unavailable_reason" in existing:
         return []
-    LockupProspectiveSignal.__table__.create(engine, checkfirst=True)
-    return [LockupProspectiveSignal.__tablename__]
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE lockup_prospective_signals "
+            "ADD COLUMN unavailable_reason VARCHAR(64) NULL"))
+    return ["lockup_prospective_signals.unavailable_reason"]
 
 
 def upgrade_milestone_6(engine: Engine) -> list[str]:
