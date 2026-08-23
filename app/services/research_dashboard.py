@@ -9,10 +9,17 @@ from app.services.backtest.analysis import (FROZEN_HYPOTHESES,
                                              analyze_two_feature_interaction)
 from app.services.backtest.dataset import build_backtest_dataset
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
+from app.services.market_calendar import resolve_observation_session
 from app.services.prospective.evaluation import evaluate_prospective_signals
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
+
+
+def _classify_non_signaled(required_t5_date, today):
+    """Return the projected M8 lifecycle state before a signal is persisted."""
+    return ("pending_observation" if required_t5_date > today
+            else "waiting_for_market_data")
 
 
 def hypothesis_metadata(hypothesis_id=HYPOTHESIS_ID):
@@ -46,6 +53,8 @@ def _signal_dict(signal, company):
                "bearish_mae_20d")
     fields = ("id", "hypothesis_id", "hypothesis_version", "ipo_id", "lockup_id",
               "security_id", "observation_date", "event_date", "event_trade_date",
+              "required_observation_date", "calendar_id", "calendar_provider",
+              "calendar_version",
               "feature1_name", "feature1_value", "feature1_threshold", "feature1_side",
               "feature2_name", "feature2_value", "feature2_threshold", "feature2_side",
               "interaction_group", "is_high_high", "signal_status",
@@ -93,16 +102,31 @@ def get_upcoming_lockups(db, *, today=None):
         if signal is None and snapshot is not None and \
                 snapshot.observation_date <= spec.prospective_start_date:
             continue
-        status = signal.signal_status if signal else "pending_observation"
-        # Stored market-session observations are the only valid T-5 dates.
-        # M8 is authoritative when a genuine prospective signal exists.
-        t5_observation_date = (signal.observation_date if signal else
-                               snapshot.observation_date if snapshot else None)
+        resolution = resolve_observation_session(event_date, spec.observation_offset)
+        # A genuine prospective M8 signal is frozen evidence.  Rows created
+        # before calendar provenance was stored have no required date, so
+        # preserve their observation date rather than recomputing identity.
+        # Lifecycle rows, by contrast, use the stored calendar-derived field
+        # when present and otherwise retain the canonical fallback.
+        if signal and signal.evaluation_mode == "prospective":
+            required_t5_date = (signal.required_observation_date or
+                                signal.observation_date or
+                                resolution.observation_session)
+        else:
+            required_t5_date = (signal.required_observation_date if signal and
+                                signal.required_observation_date else
+                                resolution.observation_session)
+        if signal:
+            status = signal.signal_status
+        else:
+            status = _classify_non_signaled(required_t5_date, today)
+        stored_t5_snapshot_date = snapshot.observation_date if snapshot else None
         t5_timing_status = ("observation_before_prospective_start"
                             if signal and signal.signal_status == "unavailable" else
                             "signal_frozen" if signal else
                             "t5_snapshot_available" if snapshot else
-                            "waiting_for_t5")
+                            "waiting_for_t5" if required_t5_date > today else
+                            "waiting_for_market_data")
         result.append({"ipo_id": ipo.id, "lockup_id": lockup.id,
             "company_name": company.name, "ticker": company.ticker, "ipo_date": ipo.ipo_date,
             "lockup_event_date": event_date,
@@ -113,7 +137,20 @@ def get_upcoming_lockups(db, *, today=None):
             "unavailable_reason": signal.unavailable_reason if signal else None,
             "has_minus5_snapshot": snapshot is not None,
             "minus5_observation_date": snapshot.observation_date if snapshot else None,
-            "t5_observation_date": t5_observation_date,
+            "required_observation_date": required_t5_date,
+            "required_t5_date": required_t5_date,
+            "stored_t5_snapshot_date": stored_t5_snapshot_date,
+            "signal_observation_date": signal.observation_date if signal else None,
+            # Deprecated backward-compatible alias.  For genuine prospective
+            # rows it preserves the historical stored observation identity
+            # when required_observation_date is absent; otherwise it is the
+            # required session identity represented by required_t5_date.
+            "t5_observation_date": required_t5_date,
+            "calendar_id": signal.calendar_id if signal and signal.calendar_id else resolution.calendar_id,
+            "calendar_provider": (signal.calendar_provider if signal and signal.calendar_provider
+                                  else resolution.calendar_provider),
+            "calendar_version": (signal.calendar_version if signal and signal.calendar_version
+                                 else resolution.calendar_version),
             "t5_snapshot_available": snapshot is not None,
             "t5_timing_status": t5_timing_status,
             "return_20d_at_minus5": float(snapshot.return_20d) if snapshot and snapshot.return_20d is not None else None,
@@ -125,10 +162,12 @@ def get_upcoming_lockups(db, *, today=None):
     return result
 
 
-def get_research_summary(db):
+def get_research_summary(db, *, today=None):
+    today = today or date.today()
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     categories = {"historical_unavailable": 0, "missed_t5_window": 0,
-                  "pending_observation": 0, "prospective_signals": 0}
+                  "pending_observation": 0, "waiting_for_market_data": 0,
+                  "prospective_signals": 0}
     prospective_rows = []
     cohort = _cohort(db)
     for lockup, _ipo, _company in cohort:
@@ -153,7 +192,11 @@ def get_research_summary(db):
               snapshot.observation_date <= spec.prospective_start_date):
             categories["historical_unavailable"] += 1
         else:
-            categories["pending_observation"] += 1
+            event_date = (lockup.stated_expiration_date or
+                          lockup.calculated_expiration_date)
+            required = resolve_observation_session(
+                event_date, spec.observation_offset).observation_session
+            categories[_classify_non_signaled(required, today)] += 1
 
     eligible_lockups = len(cohort)
     return {"eligible_lockups": eligible_lockups,

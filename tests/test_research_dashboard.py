@@ -1,5 +1,7 @@
 """Offline checks for the read-only research dashboard projection."""
+import ast
 from datetime import date, timedelta
+import inspect
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
@@ -127,7 +129,7 @@ def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():
         db.close()
 
 
-def test_upcoming_rows_are_sorted_and_t5_date_is_never_guessed():
+def test_upcoming_rows_are_sorted_and_required_t5_is_calendar_derived():
     db, historical_id, pending_id, signaled_id = _dashboard_database()
     try:
         no_snapshot_id = _add_lockup(db, 4)
@@ -136,7 +138,9 @@ def test_upcoming_rows_are_sorted_and_t5_date_is_never_guessed():
         assert [row["lockup_event_date"] for row in rows] == sorted(
             row["lockup_event_date"] for row in rows)
         row = next(row for row in rows if row["lockup_id"] == no_snapshot_id)
-        assert row["t5_observation_date"] is None
+        assert row["required_t5_date"] == date(2026, 8, 24)
+        assert row["stored_t5_snapshot_date"] is None
+        assert row["calendar_id"] == "XNYS"
         assert row["t5_snapshot_available"] is False
         assert row["t5_timing_status"] == "waiting_for_t5"
         assert row["m8_status"] == "pending_observation"
@@ -154,7 +158,47 @@ def test_stored_prospective_signal_t5_date_is_authoritative():
         row = next(row for row in get_upcoming_lockups(db)
                    if row["lockup_id"] == signaled_id)
         assert row["minus5_observation_date"] == CUTOFF - timedelta(days=1)
+        assert row["required_t5_date"] == CUTOFF + timedelta(days=2)
+        assert row["signal_observation_date"] == CUTOFF + timedelta(days=2)
         assert row["t5_observation_date"] == CUTOFF + timedelta(days=2)
+    finally:
+        db.close()
+
+
+def test_stored_prospective_required_t5_date_takes_precedence():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        signal.observation_date = CUTOFF + timedelta(days=2)
+        signal.required_observation_date = CUTOFF + timedelta(days=3)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == signaled_id)
+        assert row["required_t5_date"] == CUTOFF + timedelta(days=3)
+        assert row["signal_observation_date"] == CUTOFF + timedelta(days=2)
+        assert row["stored_t5_snapshot_date"] == CUTOFF - timedelta(days=1)
+        assert row["t5_observation_date"] == CUTOFF + timedelta(days=3)
+    finally:
+        db.close()
+
+
+def test_lifecycle_unavailable_uses_stored_required_t5_date():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        missed_id = _add_lockup(db, 7, CUTOFF, "unavailable",
+                                "observation_before_prospective_start")
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == missed_id))
+        signal.required_observation_date = CUTOFF - timedelta(days=3)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == missed_id)
+        assert row["required_t5_date"] == CUTOFF - timedelta(days=3)
+        assert row["signal_observation_date"] == CUTOFF
+        assert row["stored_t5_snapshot_date"] == CUTOFF
     finally:
         db.close()
 
@@ -209,6 +253,39 @@ def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
                 + summary["prospective_signals"] == summary["eligible_lockups"])
     finally:
         db.close()
+
+
+def test_summary_injected_date_matches_upcoming_lifecycle_projection():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        lockup_id = _add_lockup(db, 6)
+        db.commit()
+
+        for today, expected in (
+                (date(2026, 8, 23), "pending_observation"),
+                (date(2026, 8, 24), "waiting_for_market_data"),
+                (date(2026, 8, 25), "waiting_for_market_data")):
+            upcoming = next(row for row in get_upcoming_lockups(db, today=today)
+                            if row["lockup_id"] == lockup_id)
+            summary = get_research_summary(db, today=today)
+
+            assert upcoming["required_t5_date"] == date(2026, 8, 24)
+            assert upcoming["m8_status"] == expected
+            assert summary[expected] == 2
+    finally:
+        db.close()
+
+
+def test_summary_resolves_today_once_outside_its_classification_loop():
+    tree = ast.parse(inspect.getsource(get_research_summary))
+    loops = [node for node in ast.walk(tree) if isinstance(node, ast.For)]
+
+    assert len(loops) == 1
+    assert not any(isinstance(node, ast.Call) and
+                   isinstance(node.func, ast.Attribute) and
+                   isinstance(node.func.value, ast.Name) and
+                   node.func.value.id == "date" and node.func.attr == "today"
+                   for node in ast.walk(loops[0]))
 
 
 def test_summary_historical_count_is_computed_from_frozen_state_not_upcoming(monkeypatch):

@@ -59,13 +59,21 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
         LockupProspectiveSignal.__table__.create(engine, checkfirst=True)
         return [table]
     existing = {column["name"] for column in inspect(engine).get_columns(table)}
-    if "unavailable_reason" in existing:
-        return []
+    definitions = {
+        "unavailable_reason": "VARCHAR(64) NULL",
+        "required_observation_date": "DATE NULL",
+        "calendar_id": "VARCHAR(16) NULL",
+        "calendar_provider": "VARCHAR(32) NULL",
+        "calendar_version": "VARCHAR(32) NULL",
+    }
+    changed = []
     with engine.begin() as connection:
-        connection.execute(text(
-            "ALTER TABLE lockup_prospective_signals "
-            "ADD COLUMN unavailable_reason VARCHAR(64) NULL"))
-    return ["lockup_prospective_signals.unavailable_reason"]
+        for name, definition in definitions.items():
+            if name not in existing:
+                connection.execute(text(
+                    f"ALTER TABLE lockup_prospective_signals ADD COLUMN {name} {definition}"))
+                changed.append(f"lockup_prospective_signals.{name}")
+    return changed
 
 
 def upgrade_milestone_6(engine: Engine) -> list[str]:

@@ -124,17 +124,64 @@ def test_hypothesis_version_lockup_identity_is_unique_across_evaluation_modes():
         db.close()
 
 
-def test_absent_exact_session_remains_pending_without_date_guessing():
+def test_absent_snapshot_uses_calendar_and_remains_pending_before_t5():
     db = _database_with_snapshot(CUTOFF)
     try:
         snapshot = db.scalar(select(LockupSignalSnapshot))
         db.delete(snapshot)
         db.commit()
 
-        report = update_prospective_lockup_signals(db, hypothesis_id=HYPOTHESIS_ID)
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=CUTOFF)
 
         assert report.pending_observation == 1
         assert report.unavailable == 0
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
+    finally:
+        db.close()
+
+
+def test_future_event_with_missed_calendar_t5_is_unavailable_without_bars():
+    db = _database_with_snapshot(CUTOFF + timedelta(days=1))
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        lockup = db.get(IPOLockup, snapshot.lockup_id)
+        ipo = db.get(IPO, snapshot.ipo_id)
+        db.delete(snapshot)
+        lockup.stated_expiration_date = date(2026, 8, 28)
+        ipo.primary_lockup_expiration_date = lockup.stated_expiration_date
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=CUTOFF)
+        row = db.scalar(select(LockupProspectiveSignal))
+
+        assert report.unavailable_observation_before_cutoff == 1
+        assert row.signal_status == "unavailable"
+        assert row.required_observation_date == date(2026, 8, 21)
+        assert row.calendar_id == "XNYS"
+        assert row.calendar_provider == "exchange_calendars"
+        assert row.calendar_version
+    finally:
+        db.close()
+
+
+def test_reached_t5_without_snapshot_waits_for_market_data():
+    db = _database_with_snapshot(CUTOFF + timedelta(days=1))
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        lockup = db.get(IPOLockup, snapshot.lockup_id)
+        ipo = db.get(IPO, snapshot.ipo_id)
+        db.delete(snapshot)
+        lockup.stated_expiration_date = date(2026, 9, 1)
+        ipo.primary_lockup_expiration_date = lockup.stated_expiration_date
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=date(2026, 8, 25))
+
+        assert report.waiting_for_market_data == 1
+        assert report.pending_observation == 0
         assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
     finally:
         db.close()
