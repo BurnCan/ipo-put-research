@@ -103,9 +103,19 @@ def get_upcoming_lockups(db, *, today=None):
                 snapshot.observation_date <= spec.prospective_start_date:
             continue
         resolution = resolve_observation_session(event_date, spec.observation_offset)
-        required_t5_date = (signal.required_observation_date if signal and
-                            signal.required_observation_date else
-                            resolution.observation_session)
+        # A genuine prospective M8 signal is frozen evidence.  Rows created
+        # before calendar provenance was stored have no required date, so
+        # preserve their observation date rather than recomputing identity.
+        # Lifecycle rows, by contrast, use the stored calendar-derived field
+        # when present and otherwise retain the canonical fallback.
+        if signal and signal.evaluation_mode == "prospective":
+            required_t5_date = (signal.required_observation_date or
+                                signal.observation_date or
+                                resolution.observation_session)
+        else:
+            required_t5_date = (signal.required_observation_date if signal and
+                                signal.required_observation_date else
+                                resolution.observation_session)
         if signal:
             status = signal.signal_status
         else:
@@ -130,8 +140,11 @@ def get_upcoming_lockups(db, *, today=None):
             "required_observation_date": required_t5_date,
             "required_t5_date": required_t5_date,
             "stored_t5_snapshot_date": stored_t5_snapshot_date,
-            # Backward-compatible alias; unlike the explicit fields above this
-            # is deprecated and always means required session identity.
+            "signal_observation_date": signal.observation_date if signal else None,
+            # Deprecated backward-compatible alias.  For genuine prospective
+            # rows it preserves the historical stored observation identity
+            # when required_observation_date is absent; otherwise it is the
+            # required session identity represented by required_t5_date.
             "t5_observation_date": required_t5_date,
             "calendar_id": signal.calendar_id if signal and signal.calendar_id else resolution.calendar_id,
             "calendar_provider": (signal.calendar_provider if signal and signal.calendar_provider
