@@ -3,6 +3,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,66 @@ def test_script_help_is_cwd_independent_and_noninteractive(tmp_path):
     )
     assert completed.returncode == 0
     assert "--dry-run" in completed.stdout
+
+
+def test_project_root_is_on_sys_path_for_runtime_imports():
+    original_sys_path = sys.path.copy()
+    try:
+        sys.path[:] = [entry for entry in sys.path if entry != str(ROOT)]
+        isolated_spec = importlib.util.spec_from_file_location("isolated_pipeline", SCRIPT)
+        isolated_pipeline = importlib.util.module_from_spec(isolated_spec)
+        assert isolated_spec.loader is not None
+        isolated_spec.loader.exec_module(isolated_pipeline)
+        assert sys.path[0] == str(ROOT)
+    finally:
+        sys.path[:] = original_sys_path
+
+
+def test_direct_script_run_is_cwd_independent(tmp_path):
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--skip-market-history", "--skip-m6", "--skip-m8",
+         "--lock-file", str(tmp_path / "pipeline.lock")],
+        cwd=tmp_path, text=True, capture_output=True, timeout=10, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["status"] == "ok"
+
+
+def test_main_restores_callers_cwd(tmp_path, monkeypatch):
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
+    monkeypatch.chdir(caller_cwd)
+
+    assert pipeline.main([
+        "--skip-market-history", "--skip-m6", "--skip-m8",
+        "--lock-file", str(tmp_path / "pipeline.lock"),
+    ]) == 0
+    assert Path.cwd() == caller_cwd
+
+
+def test_market_history_runtime_imports_resolve(monkeypatch):
+    class FakeSession:
+        def __enter__(self):
+            return "database-session"
+
+        def __exit__(self, *args):
+            return None
+
+    fake_db = types.ModuleType("app.db")
+    fake_db.SessionLocal = FakeSession
+    fake_market_history = types.ModuleType("app.services.market_history")
+    fake_market_history.create_provider = lambda: "provider"
+    fake_market_history.ingest_market_history = (
+        lambda db, provider, **kwargs: {"db": db, "provider": provider, **kwargs}
+    )
+    monkeypatch.setitem(sys.modules, "app.db", fake_db)
+    monkeypatch.setitem(sys.modules, "app.services.market_history", fake_market_history)
+
+    result = pipeline.run_market_history()
+    assert result["db"] == "database-session"
+    assert result["provider"] == "provider"
+    assert result["sleep_seconds"] == 12.0
+    assert {key: result[key] for key in pipeline.COHORT} == pipeline.COHORT
 
 
 def test_skips_are_explicit_and_dry_run_reaches_only_m8():
