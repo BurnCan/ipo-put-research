@@ -4,10 +4,28 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict
+from dataclasses import asdict, dataclass
 
 from .dataset import FEATURE_COLUMNS, OUTCOME_COLUMNS
 
 STANDARD_OFFSETS = (-60, -40, -20, -10, -5, -1)
+
+
+@dataclass(frozen=True)
+class FrozenHypothesis:
+    """Stable, non-database identity for a prospectively testable hypothesis."""
+    feature1: str
+    feature2: str
+    outcome: str
+    observation_offset: int
+    grouping_rule: str = "median_split"
+    analysis_version: str = "m7_robustness_v1"
+
+
+FROZEN_HYPOTHESES = {
+    "m7_return20_vol20_minus5_post20": FrozenHypothesis(
+        "return_20d", "realized_vol_20d", "post_20d_return", -5)
+}
 
 
 def _mean(values): return statistics.fmean(values) if values else None
@@ -135,7 +153,140 @@ def _ols_two_feature(rows, feature1, feature2, outcome):
             "standardized_beta_feature2": b2 * math.sqrt(s22 / n) / sy if sy else None}
 
 
-def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset):
+def _complete_interaction_rows(rows, feature1, feature2, outcome, offset):
+    unique = {}
+    input_rows = [r for r in rows if r.get("observation_offset") == offset]
+    for row in input_rows:
+        unique.setdefault(row["lockup_id"], row)
+    valid = [r for r in unique.values() if r.get(feature1) is not None and
+             r.get(feature2) is not None and r.get(outcome) is not None]
+    return input_rows, unique, valid
+
+
+def _high_high(rows, feature1, feature2, outcome):
+    median1 = _median([float(r[feature1]) for r in rows])
+    median2 = _median([float(r[feature2]) for r in rows])
+    members = [] if median1 is None else [
+        r for r in rows if float(r[feature1]) > median1 and float(r[feature2]) > median2]
+    group = _interaction_group(members, feature1, feature2, outcome)
+    return {
+        "n_high_high": group["n_observations"],
+        "bearish_hit_rate": group["bearish_hit_rate"],
+        "mean_outcome": group["mean_outcome"],
+        "median_outcome": group["median_outcome"],
+        "le_5pct_rate": group["magnitude_thresholds"]["le_5pct"]["rate"],
+        "le_10pct_rate": group["magnitude_thresholds"]["le_10pct"]["rate"],
+        "le_20pct_rate": group["magnitude_thresholds"]["le_20pct"]["rate"],
+        "median_bearish_mfe": group["median_bearish_mfe"],
+        "median_bearish_mae": group["median_bearish_mae"],
+    }
+
+
+def _range_summary(values):
+    values = [v for v in values if v is not None]
+    return {"min": min(values) if values else None, "max": max(values) if values else None,
+            "median": _median(values), "mean": _mean(values)}
+
+
+def _different_sign(value, reference):
+    return value is not None and reference is not None and _coefficient_sign(value) != _coefficient_sign(reference)
+
+
+def _influence(rows, feature1, feature2, outcome, ols):
+    """Exact hat diagonals and standard OLS residual diagnostics."""
+    if ols["intercept"] is None:
+        return {"status": ols["status"], "ranking_rule": "unavailable", "rows": [], "top_5": []}
+    n, p = len(rows), 3
+    x1, x2 = [float(r[feature1]) for r in rows], [float(r[feature2]) for r in rows]
+    m1, m2 = _mean(x1), _mean(x2)
+    c1, c2 = [v-m1 for v in x1], [v-m2 for v in x2]
+    s11, s22 = sum(v*v for v in c1), sum(v*v for v in c2)
+    s12 = sum(a*b for a, b in zip(c1, c2)); det = s11*s22-s12*s12
+    residuals = [float(r[outcome])-(ols["intercept"]+ols["feature1_coefficient"]*a+
+                 ols["feature2_coefficient"]*b) for r, a, b in zip(rows, x1, x2)]
+    rss = sum(e*e for e in residuals)
+    mse = rss/(n-p) if n > p else None
+    result = []
+    for row, a, b, residual in zip(rows, c1, c2, residuals):
+        leverage = 1/n + (s22*a*a - 2*s12*a*b + s11*b*b)/det
+        if -1e-12 < leverage < 0: leverage = 0.0
+        if 1 < leverage < 1+1e-12: leverage = 1.0
+        predicted = float(row[outcome])-residual
+        usable = mse is not None and mse > 0 and leverage < 1
+        standardized = residual/math.sqrt(mse*(1-leverage)) if usable else None
+        cooks = (residual*residual/(p*mse))*leverage/((1-leverage)**2) if usable else None
+        result.append({"lockup_id": row["lockup_id"], "ticker": row.get("ticker"),
+                       "actual_outcome": float(row[outcome]), "predicted_outcome": predicted,
+                       "residual": residual, "leverage": leverage,
+                       "standardized_residual": standardized, "cooks_distance": cooks})
+    if any(r["cooks_distance"] is not None for r in result):
+        rule = "cooks_distance_desc_then_lockup_id"
+        ranked = sorted(result, key=lambda r: (r["cooks_distance"] is None,
+                                                -(r["cooks_distance"] or 0),
+                                                r["lockup_id"]))
+    else:
+        rule = "absolute_standardized_residual_desc_then_leverage_desc_then_lockup_id"
+        ranked = sorted(result, key=lambda r: (-(abs(r["standardized_residual"]) if r["standardized_residual"] is not None else -1),
+                                                -r["leverage"], r["lockup_id"]))
+    return {"status": "ok", "ranking_rule": rule, "rows": ranked, "top_5": ranked[:5]}
+
+
+def analyze_interaction_robustness(rows, feature1, feature2, outcome, offset, full_ols=None):
+    """Leave one event out without searching features, offsets, or thresholds."""
+    _, _, valid = _complete_interaction_rows(rows, feature1, feature2, outcome, offset)
+    valid = sorted(valid, key=lambda r: r["lockup_id"])
+    full_ols = full_ols or _ols_two_feature(valid, feature1, feature2, outcome)
+    runs = []
+    for excluded in valid:
+        reduced = [r for r in valid if r["lockup_id"] != excluded["lockup_id"]]
+        fit = _ols_two_feature(reduced, feature1, feature2, outcome)
+        runs.append({"excluded_lockup_id": excluded["lockup_id"],
+                     "excluded_ticker": excluded.get("ticker"), "n": len(reduced),
+                     "feature1_coefficient": fit["feature1_coefficient"],
+                     "feature2_coefficient": fit["feature2_coefficient"],
+                     "standardized_beta_feature1": fit["standardized_beta_feature1"],
+                     "standardized_beta_feature2": fit["standardized_beta_feature2"],
+                     "r_squared": fit["r_squared"], "status": fit["status"],
+                     **_high_high(reduced, feature1, feature2, outcome)})
+    successful = [r for r in runs if r["status"] == "ok"]
+    fields = ("feature1_coefficient", "feature2_coefficient", "standardized_beta_feature1",
+              "standardized_beta_feature2", "r_squared")
+    coefficient_summary = {}
+    for field in fields:
+        summary = {"full_sample_value": full_ols[field], **_range_summary([r[field] for r in successful])}
+        if field in ("feature1_coefficient", "feature2_coefficient"):
+            summary["sign_flip_count"] = sum(_different_sign(r[field], full_ols[field]) for r in successful)
+        coefficient_summary[field] = summary
+    group_fields = ("n_high_high", "bearish_hit_rate", "mean_outcome", "median_outcome",
+                    "le_20pct_rate", "median_bearish_mfe", "median_bearish_mae")
+    high_summary = {field: _range_summary(
+        [r[field] for r in runs if field == "n_high_high" or r["n_high_high"]])
+        for field in group_fields}
+    high_summary["empty_high_high_runs"] = sum(r["n_high_high"] == 0 for r in runs)
+    hypothesis = FrozenHypothesis(feature1, feature2, outcome, offset)
+    hypothesis_id = next((name for name, spec in FROZEN_HYPOTHESES.items()
+                          if spec == hypothesis), None)
+    return {
+        "hypothesis_id": hypothesis_id,
+        "hypothesis": asdict(hypothesis),
+        "leave_one_out": runs,
+        "coefficient_summary": coefficient_summary,
+        "run_counts": {"successful_runs": len(successful), "failed_runs": len(runs)-len(successful),
+                       "total_runs": len(runs)},
+        "high_high_summary": high_summary,
+        "influence": _influence(valid, feature1, feature2, outcome, full_ols),
+        "feature1_sign_stable": coefficient_summary["feature1_coefficient"]["sign_flip_count"] == 0,
+        "feature2_sign_stable": coefficient_summary["feature2_coefficient"]["sign_flip_count"] == 0,
+        "high_high_median_outcome_always_negative": bool(runs) and all(
+            r["median_outcome"] is not None and r["median_outcome"] < 0 for r in runs),
+        "high_high_bearish_hit_rate_min": high_summary["bearish_hit_rate"]["min"],
+        "small_sample_warning": True, "exploratory_only": True,
+        "no_multiple_testing_correction": True,
+        "leave_one_out_is_not_out_of_sample_validation": True,
+    }
+
+
+def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset, robustness=False):
     """Run one explicitly requested two-feature analysis at one offset."""
     if feature1 not in FEATURE_COLUMNS:
         raise ValueError(f"not an allowed pre-event feature: {feature1}")
@@ -144,13 +295,7 @@ def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset):
     if outcome not in OUTCOME_COLUMNS:
         raise ValueError(f"not an allowed retrospective outcome: {outcome}")
     if offset is None: raise ValueError("two-feature interaction requires an explicit offset")
-    input_rows = [r for r in rows if r.get("observation_offset") == offset]
-    # Dataset rows are already unique, but retain only the first occurrence so a
-    # lockup can never be weighted twice if callers supply ad-hoc input.
-    unique = {}
-    for row in input_rows: unique.setdefault(row["lockup_id"], row)
-    valid = [r for r in unique.values() if r.get(feature1) is not None and
-             r.get(feature2) is not None and r.get(outcome) is not None]
+    input_rows, unique, valid = _complete_interaction_rows(rows, feature1, feature2, outcome, offset)
     values1, values2 = ([float(r[name]) for r in valid] for name in (feature1, feature2))
     median1, median2 = _median(values1), _median(values2)
     cells = {name: [] for name in ("low_low", "low_high", "high_low", "high_high")}
@@ -159,7 +304,7 @@ def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset):
             side1 = "low" if float(row[feature1]) <= median1 else "high"
             side2 = "low" if float(row[feature2]) <= median2 else "high"
             cells[f"{side1}_{side2}"].append(row)
-    return {"analysis_type": "two_feature_interaction", "feature1": feature1,
+    report = {"analysis_type": "two_feature_interaction", "feature1": feature1,
             "feature2": feature2, "outcome": outcome, "observation_offset": offset,
             "n_input_rows": len(input_rows), "n_valid_rows": len(valid),
             "n_excluded_missing": len(unique) - len(valid),
@@ -170,6 +315,10 @@ def analyze_two_feature_interaction(rows, feature1, feature2, outcome, offset):
             "ols": _ols_two_feature(valid, feature1, feature2, outcome),
             "repeated_measures_by_lockup": True, "p_values_are_exploratory": True,
             "small_sample_warning": True}
+    if robustness:
+        report["robustness"] = analyze_interaction_robustness(
+            valid, feature1, feature2, outcome, offset, report["ols"])
+    return report
 
 
 def analyze_offset(rows, feature, outcome, offset):

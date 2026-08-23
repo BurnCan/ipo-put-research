@@ -97,6 +97,7 @@ def test_allowlists_apply_to_both_features_and_outcome():
 @pytest.mark.parametrize("arguments,expected", [
     (["tool", "--interaction", "--offset", "-5"], "--second-feature"),
     (["tool", "--interaction", "--second-feature", "realized_vol_20d"], "--offset"),
+    (["tool", "--robustness"], "--interaction"),
 ])
 def test_cli_interaction_requirements(monkeypatch, capsys, arguments, expected):
     monkeypatch.setattr(sys, "argv", arguments)

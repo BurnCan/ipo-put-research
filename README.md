@@ -879,6 +879,39 @@ python scripts/analyze_lockup_backtest.py \
   --interaction
 ```
 
+### Frozen M7 robustness analysis
+
+The hypothesis `m7_return20_vol20_minus5_post20` was selected before this
+robustness analysis and is frozen as `return_20d` plus
+`realized_vol_20d`, observed at offset `-5`, against `post_20d_return`, with a
+`median_split` grouping rule and analysis version `m7_robustness_v1`. Run it
+explicitly with:
+
+```bash
+python scripts/analyze_lockup_backtest.py \
+  --feature return_20d \
+  --second-feature realized_vol_20d \
+  --outcome post_20d_return \
+  --offset -5 \
+  --interaction \
+  --robustness
+```
+
+Robustness mode reruns the same intercept-plus-two-feature OLS once per event,
+leaving exactly that event out. It reports coefficient ranges and sign flips.
+It also rebuilds all median-split cells from each reduced sample: the medians
+and therefore `high_high` membership are recomputed after every exclusion.
+Full-sample leverage, residual, standardized-residual, and Cook's-distance
+diagnostics identify observations that strongly affect the fit; the tool never
+automatically excludes influential observations.
+
+This remains small-sample, exploratory sensitivity analysis. Leave-one-event-
+out stability is **not** true out-of-sample validation and does not establish a
+trading edge. It does not search new features, pairs, offsets, thresholds, or
+models, and it applies no multiple-testing correction. The frozen identity is
+only a stable specification for later evaluation on future matured events; no
+future result is recorded or evaluated by this command.
+
 These two features were chosen before running this analysis. Complete cases are split
 into four groups using each feature's analysis-sample median: low is less than or
 equal to the median and high is greater than the median. No threshold optimization,

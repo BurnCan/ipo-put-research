@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--offset", type=int)
     parser.add_argument("--persistence", action="store_true")
     parser.add_argument("--interaction", action="store_true")
+    parser.add_argument("--robustness", action="store_true")
     parser.add_argument("--ticker")
     parser.add_argument("--ipo-id", type=int)
     args = parser.parse_args()
@@ -26,10 +27,13 @@ def main():
         parser.error("--interaction requires --second-feature")
     if args.interaction and args.offset is None:
         parser.error("--interaction requires an explicit --offset")
+    if args.robustness and not args.interaction:
+        parser.error("--robustness requires --interaction")
     with SessionLocal() as db: rows = build_backtest_dataset(db, ticker=args.ticker, ipo_id=args.ipo_id)
     if args.interaction:
         report = analyze_two_feature_interaction(
-            rows, args.feature, args.second_feature, args.outcome, args.offset)
+            rows, args.feature, args.second_feature, args.outcome, args.offset,
+            robustness=args.robustness)
     else:
         report = analyze_feature(rows, args.feature, args.outcome, args.offset)
     if args.persistence: report["persistence"] = classify_signal_persistence(rows, args.feature)
