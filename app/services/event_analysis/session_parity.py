@@ -96,6 +96,23 @@ def mismatching_session_parity_rows(rows):
     return [row for row in rows if row.mismatch_type != "exact_match"]
 
 
+def _is_sparse_data_related(row):
+    """Return whether existing row evidence ties a session mismatch to sparse bars.
+
+    Reproducing the legacy stored-bar offset establishes the causal link; missing
+    canonical sessions supplies the sparse-history evidence.  For event identity
+    mismatches, the missing session must specifically include the canonical event
+    session.  This deliberately does not infer sparse history from mismatched
+    dates alone.
+    """
+    if (row.mismatch_type in {"exact_match", "missing_required_fields"} or
+            not row.old_bar_offset_reproduced or not row.missing_expected_sessions):
+        return False
+    if not row.event_session_match:
+        return row.canonical_event_trade_date in row.missing_expected_sessions
+    return row.mismatch_type == "observation_session_mismatch_sparse_history"
+
+
 def _audit_one(db, snapshot, lockup, company):
     event_date, source = event_date_with_source(lockup)
     canonical_event = canonical_observation = None
@@ -157,6 +174,12 @@ def audit_m6_session_parity(db, *, classification_status="classified",
 
 
 def summarize_session_parity(db, rows):
+    """Summarize immutable audit results without changing row classifications.
+
+    ``total_session_mismatches`` includes event-only, observation-only, and
+    combined identity mismatches.  Exact matches and rows that cannot be audited
+    because required fields are missing are excluded.
+    """
     counts = Counter(row.mismatch_type for row in rows)
     by_offset = defaultdict(Counter)
     for row in rows: by_offset[str(row.observation_offset)][row.mismatch_type] += 1
@@ -177,7 +200,8 @@ def summarize_session_parity(db, rows):
     affected, recomputable = [], 0
     for row in discovery:
         if row.mismatch_type == "exact_match": continue
-        affected.append({"ticker": row.ticker, "lockup_id": row.lockup_id})
+        affected.append({"ticker": row.ticker, "lockup_id": row.lockup_id,
+                         "mismatch_type": row.mismatch_type})
         if row.canonical_observation_date is not None:
             required_dates = _feature_window(row.canonical_observation_date)
             stored_dates = set(db.scalars(select(DailyPrice.trade_date).where(
@@ -185,6 +209,15 @@ def summarize_session_parity(db, rows):
                 DailyPrice.trade_date.in_(required_dates))))
             recomputable += int(stored_dates == set(required_dates))
     mismatch_count = len(affected)
+    session_mismatch_types = {
+        "event_session_mismatch",
+        "observation_session_mismatch_sparse_history",
+        "observation_session_mismatch_unexplained",
+        "event_and_observation_mismatch",
+    }
+    total_session_mismatches = sum(counts[k] for k in session_mismatch_types)
+    observation_sparse_history_cases = counts[
+        "observation_session_mismatch_sparse_history"]
     return {
         "snapshots_seen": len(rows), "exact_matches": counts["exact_match"],
         "event_session_mismatches": counts["event_session_mismatch"],
@@ -197,7 +230,13 @@ def summarize_session_parity(db, rows):
             counts["observation_session_mismatch_unexplained"],
         "event_and_observation_mismatches": counts["event_and_observation_mismatch"],
         "missing_required_fields": counts["missing_required_fields"],
-        "sparse_market_history_cases": counts["observation_session_mismatch_sparse_history"],
+        "total_session_mismatches": total_session_mismatches,
+        "observation_sparse_history_cases": observation_sparse_history_cases,
+        # Deprecated compatibility alias.  This is observation-only, despite the
+        # old name sounding like an aggregate of every sparse-history mismatch.
+        "sparse_market_history_cases": observation_sparse_history_cases,
+        "sparse_data_related_mismatches": sum(_is_sparse_data_related(row)
+                                                for row in rows),
         "unexplained_mismatches": counts["observation_session_mismatch_unexplained"],
         "canonical_calendar_id": CALENDAR_ID,
         "canonical_calendar_provider": CALENDAR_PROVIDER,
@@ -208,6 +247,8 @@ def summarize_session_parity(db, rows):
         "m7_discovery_events": len(discovery),
         "m7_events_with_session_mismatch": mismatch_count,
         "m7_events_with_exact_session_match": len(discovery) - mismatch_count,
+        "m7_session_mismatch_rate": (mismatch_count / len(discovery)
+                                     if discovery else 0.0),
         "m7_affected_events": sorted(affected, key=lambda x: ((x["ticker"] or ""), x["lockup_id"])),
         "canonical_features_recomputable": recomputable,
         "canonical_features_not_recomputable_due_to_missing_bars": mismatch_count - recomputable,
