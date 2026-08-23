@@ -72,6 +72,18 @@ def session_offset(session_day: date, offset: int) -> date:
     return _calendar().session_offset(day, offset).date()
 
 
+def sessions_in_range(start_date: date, end_date: date) -> tuple[date, ...]:
+    """Return inclusive XNYS sessions after aligning the two range boundaries."""
+    start_date, end_date = _day(start_date), _day(end_date)
+    if start_date > end_date:
+        return ()
+    start = session_on_or_after(start_date)
+    end = session_on_or_before(end_date)
+    if start > end:
+        return ()
+    return tuple(value.date() for value in _calendar().sessions_in_range(start, end))
+
+
 def resolve_event_session(event_date: date) -> SessionResolution:
     event_date = _day(event_date)
     return SessionResolution(event_date, session_on_or_after(event_date), None, None)
