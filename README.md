@@ -1122,3 +1122,29 @@ The SEC asks automated clients to identify themselves and comply with its fair-a
 ## Disclaimer
 
 This project is a research prototype. It does not provide investment advice and does not currently submit trades.
+
+## M6 canonical-session parity audit
+
+Historical M6 snapshots treated the available `DailyPrice` rows as trading-session
+identity. Consequently, sparse stored history can shift an offset such as T-5 away
+from the exact fifth exchange session. The read-only parity audit compares the
+stored event and observation dates with the expected sessions from the canonical
+XNYS `exchange_calendars` service, reports missing bars and whether the old
+stored-bar offset is reproducible, and measures exposure in the frozen M7
+discovery cohort.
+
+The audit does **not** rewrite M6 snapshots, M7 evidence or thresholds, or M8
+prospective signals. A later, explicitly versioned recalculation can be considered
+only after this impact has been measured.
+
+```bash
+python scripts/audit_m6_session_parity.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only \
+  --mismatches-only
+```
+
+Use `--details` for all rows, `--ticker`, `--ipo-id`, or `--lockup-id` to narrow
+the cohort, and optional `--output path.csv` to export the selected detail rows.
