@@ -88,9 +88,12 @@ def get_upcoming_lockups(db, *, today=None):
             LockupProspectiveSignal.lockup_id == lockup.id,
             LockupProspectiveSignal.hypothesis_id == HYPOTHESIS_ID,
             LockupProspectiveSignal.evaluation_mode == "prospective"))
-        historical = snapshot is not None and snapshot.observation_date <= spec.prospective_start_date
-        status = ("unavailable_historical" if historical else
-                  signal.signal_status if signal else "pending_observation")
+        # Stored M8 state is authoritative.  Only snapshot-only rows belong to
+        # historical discovery and must not leak into prospective monitoring.
+        if signal is None and snapshot is not None and \
+                snapshot.observation_date <= spec.prospective_start_date:
+            continue
+        status = signal.signal_status if signal else "pending_observation"
         result.append({"ipo_id": ipo.id, "lockup_id": lockup.id,
             "company_name": company.name, "ticker": company.ticker, "ipo_date": ipo.ipo_date,
             "lockup_event_date": event_date,
@@ -112,8 +115,9 @@ def get_upcoming_lockups(db, *, today=None):
 def get_research_summary(db):
     upcoming = get_upcoming_lockups(db)
     signals = get_prospective_signal_rows(db)
-    return {"eligible_lockups": len(upcoming),
-            "historical_unavailable": sum(r["m8_status"] == "unavailable_historical" for r in upcoming),
+    eligible_lockups = len(_cohort(db))
+    return {"eligible_lockups": eligible_lockups,
+            "historical_unavailable": eligible_lockups - len(upcoming),
             "pending_observation": sum(r["m8_status"] == "pending_observation" for r in upcoming),
             "prospective_signals": len(signals),
             "awaiting_event": sum(r["signal_status"] == "awaiting_event" for r in signals),

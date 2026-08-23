@@ -1,9 +1,81 @@
 """Offline checks for the read-only research dashboard projection."""
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.db import Base
+from app.models import (Company, Filing, IPO, IPOLockup, LockupProspectiveSignal,
+                        LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
-from app.services.research_dashboard import HYPOTHESIS_ID, hypothesis_metadata
+from app.services.event_analysis.constants import SNAPSHOT_VERSION
+from app.services.research_dashboard import (HYPOTHESIS_ID, get_research_summary,
+                                               get_upcoming_lockups,
+                                               hypothesis_metadata)
+from app.services import research_dashboard
+
+
+CUTOFF = date(2026, 8, 23)
+
+
+def _add_lockup(db, number, observation_date=None, signal_status=None):
+    ticker = f"T{number}"
+    company = Company(cik=f"{number:010d}", name=f"Company {number}", ticker=ticker)
+    filing = Filing(company=company, form_type="424B4", filed_at=date(2026, 1, 2),
+                    accession_number=f"filing-{number}", filing_path="filing.txt",
+                    sec_url="https://example.test/filing")
+    ipo = IPO(company=company, ipo_date=date(2026, 1, 2), ipo_price=10,
+              classification_status="classified", candidate_type="operating_company_ipo",
+              offering_status="priced")
+    event_date = (observation_date or CUTOFF) + timedelta(days=7)
+    lockup = IPOLockup(ipo=ipo, filing=filing, holder_group="all", lockup_type="standard",
+                       stated_expiration_date=event_date, confidence=.9, parser_name="test",
+                       parser_version="1", source_excerpt="test", source_locator="test",
+                       evidence_key=f"lockup-{number}")
+    security = Security(company=company, ticker=ticker, source="test")
+    db.add_all((lockup, security))
+    db.flush()
+    ipo.primary_lockup_id = lockup.id
+    ipo.primary_lockup_expiration_date = event_date
+    if observation_date is not None:
+        db.add(LockupSignalSnapshot(
+            ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id,
+            observation_offset=-5, observation_date=observation_date,
+            data_cutoff_date=observation_date, event_date=event_date,
+            event_date_source="stated", event_trade_date=event_date,
+            snapshot_version=SNAPSHOT_VERSION, trading_sessions_to_event=5,
+            trading_sessions_since_first_trade=50, available_history_sessions=50,
+            close=10, return_20d=.04, realized_vol_20d=.9,
+            post_ipo_high_to_date=12, post_ipo_low_to_date=8))
+    if signal_status is not None:
+        spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
+        db.add(LockupProspectiveSignal(
+            hypothesis_id=HYPOTHESIS_ID, hypothesis_version=spec.analysis_version,
+            ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id,
+            observation_offset=-5, observation_date=observation_date,
+            event_date=event_date, event_trade_date=event_date,
+            feature1_name=spec.feature1, feature1_value=.04,
+            feature1_threshold=spec.feature1_threshold, feature1_side="low",
+            feature2_name=spec.feature2, feature2_value=.9,
+            feature2_threshold=spec.feature2_threshold, feature2_side="high",
+            interaction_group="low_high", is_high_high=False,
+            signal_status=signal_status, evaluation_mode="prospective"))
+    db.flush()
+    return lockup.id
+
+
+def _dashboard_database():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    historical_id = _add_lockup(db, 1, CUTOFF)
+    pending_id = _add_lockup(db, 2, CUTOFF + timedelta(days=1))
+    signaled_id = _add_lockup(db, 3, CUTOFF - timedelta(days=1), "awaiting_event")
+    db.commit()
+    return db, historical_id, pending_id, signaled_id
 
 
 def test_hypothesis_metadata_is_registry_projection():
@@ -32,3 +104,71 @@ def test_research_routes_are_get_only():
     routes = Path("app/api/routes.py").read_text(encoding="utf-8")
     assert routes.count('@router.get("/research/') == 6
     assert '@router.post("/research/' not in routes
+
+
+def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():
+    db, historical_id, pending_id, signaled_id = _dashboard_database()
+    try:
+        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db)}
+
+        assert historical_id not in rows
+        assert rows[pending_id]["m8_status"] == "pending_observation"
+        assert rows[signaled_id]["m8_status"] == "awaiting_event"
+        assert rows[signaled_id]["minus5_observation_date"] == date(2026, 8, 22)
+        assert all(row["m8_status"] != "unavailable_historical" for row in rows.values())
+    finally:
+        db.close()
+
+
+def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
+    db, historical_id, pending_id, signaled_id = _dashboard_database()
+    try:
+        assert {row["lockup_id"] for row in get_upcoming_lockups(db)} == {
+            pending_id, signaled_id}
+        summary = get_research_summary(db)
+        assert summary["eligible_lockups"] == 3
+        assert summary["historical_unavailable"] == 1
+        assert summary["pending_observation"] == 1
+        assert summary["prospective_signals"] == 1
+        assert (summary["historical_unavailable"] + summary["pending_observation"]
+                + summary["prospective_signals"] == summary["eligible_lockups"])
+    finally:
+        db.close()
+
+
+def test_historical_reference_still_uses_frozen_discovery_rows(monkeypatch):
+    captured = {}
+    dataset = [
+        {"lockup_id": 1, "observation_date": CUTOFF},
+        {"lockup_id": 2, "observation_date": CUTOFF + timedelta(days=1)},
+    ]
+    monkeypatch.setattr(research_dashboard, "build_backtest_dataset", lambda db: dataset)
+
+    def fake_analysis(rows, *args, **kwargs):
+        captured["rows"] = rows
+        return {"n_events": len(rows), "ols": {}, "groups": {}, "robustness": {
+            "feature1_sign_stable": True, "feature2_sign_stable": True,
+            "high_high_median_outcome_always_negative": True,
+            "high_high_bearish_hit_rate_min": 1.0, "coefficient_summary": {}}}
+
+    monkeypatch.setattr(research_dashboard, "analyze_two_feature_interaction", fake_analysis)
+    report = research_dashboard.get_historical_reference(object())
+
+    assert [row["lockup_id"] for row in captured["rows"]] == [1]
+    assert report["discovery_sample_n"] == 1
+    assert report["analysis_type"] == "historical_discovery"
+
+
+def test_prospective_evaluation_remains_m8_prospective_only(monkeypatch):
+    captured = {}
+
+    def fake_evaluation(db, *, hypothesis_id):
+        captured.update(db=db, hypothesis_id=hypothesis_id)
+        return {"evaluation_mode": "prospective"}
+
+    monkeypatch.setattr(research_dashboard, "evaluate_prospective_signals", fake_evaluation)
+    sentinel_db = object()
+
+    assert research_dashboard.get_prospective_evaluation(sentinel_db) == {
+        "evaluation_mode": "prospective"}
+    assert captured == {"db": sentinel_db, "hypothesis_id": HYPOTHESIS_ID}
