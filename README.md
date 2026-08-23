@@ -1135,10 +1135,26 @@ discovery cohort.
 
 Each detail row distinguishes exact matches, event-only mismatches,
 sparse-history observation mismatches, unexplained observation mismatches,
-combined event/observation mismatches, and missing required fields. The summary's
-`sparse_market_history_cases` and `unexplained_mismatches` counters are totals of
-those corresponding row classifications. M7 canonical features are reported as
-recomputable only when all 21 canonical sessions needed by the existing M6
+combined event/observation mismatches, and missing required fields. Summary
+counters retain that separation: `observation_sparse_history_cases` counts only
+observation-session mismatches reproduced from sparse stored-bar history;
+event-only and combined mismatches have their own counters. The deprecated
+`sparse_market_history_cases` name remains as an observation-only compatibility
+alias. `total_session_mismatches` is the sum of event-only, observation-only
+(both sparse and unexplained), and combined session-identity mismatches; it
+excludes exact matches and rows with missing required fields.
+
+`sparse_data_related_mismatches` is a separate, evidence-based aggregate. It
+requires both missing expected sessions and reproduction of the legacy stored-bar
+offset; an event mismatch additionally requires that its canonical event session
+is missing. It never infers sparse history from a date mismatch alone. Thus a
+live result can be read as distinct exact matches, observation mismatches, event
+mismatches, and combined mismatches, while the total reconciles the three
+mismatch categories without obscuring their causes.
+
+The M7 impact summary reports the mismatch rate and includes each affected
+discovery event's actual T-5 mismatch type. M7 canonical features are reported
+as recomputable only when all 21 exact XNYS sessions needed by the existing M6
 20-session return and realized-volatility formulas are stored through T-5.
 
 The audit does **not** rewrite M6 snapshots, M7 evidence or thresholds, or M8

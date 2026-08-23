@@ -1,4 +1,5 @@
 """Offline regression tests for the read-only M6 canonical-session audit."""
+from dataclasses import replace
 from datetime import date
 
 from sqlalchemy import inspect, select
@@ -79,6 +80,11 @@ def test_audit_is_deterministic_read_only_and_summary_has_metadata():
     assert report["canonical_calendar_version"]
     assert report["sparse_market_history_cases"] == sum(
         r.mismatch_type == "observation_session_mismatch_sparse_history" for r in rows)
+    assert report["observation_sparse_history_cases"] == sum(
+        r.mismatch_type == "observation_session_mismatch_sparse_history" for r in rows)
+    assert (report["sparse_market_history_cases"] ==
+            report["observation_sparse_history_cases"])
+    assert report == summarize_session_parity(db, rows)
     assert report["unexplained_mismatches"] == sum(
         r.mismatch_type == "observation_session_mismatch_unexplained" for r in rows)
 
@@ -145,6 +151,9 @@ def test_missing_required_fields_ticker_lockup_filters_and_ordering():
     rows = _audit(db)
     assert rows
     assert all(row.mismatch_type == "missing_required_fields" for row in rows)
+    report = summarize_session_parity(db, rows)
+    assert report["total_session_mismatches"] == 0
+    assert report["missing_required_fields"] == len(rows)
     assert audit_m6_session_parity(
         db, classification_status=None, candidate_type=None, offering_status=None,
         primary_lockup_only=False, ticker="ses") == rows
@@ -198,8 +207,49 @@ def test_m7_discovery_impact_and_exact_canonical_feature_coverage():
     assert report["m7_discovery_events"] == 1
     assert report["m7_events_with_session_mismatch"] == 1
     assert report["m7_events_with_exact_session_match"] == 0
+    assert report["m7_session_mismatch_rate"] == 1.0
+    assert report["m7_affected_events"] == [{
+        "ticker": "SES", "lockup_id": 1,
+        "mismatch_type": "observation_session_mismatch_unexplained",
+    }]
     assert report["canonical_features_recomputable"] == 1
     assert report["canonical_features_not_recomputable_due_to_missing_bars"] == 0
+    db.close()
+
+
+def test_summary_session_mismatch_categories_are_distinct_and_reconcile():
+    event = date(2026, 7, 29)
+    db, lockup, security = analysis_database(
+        event, _canonical_sessions_ending(event, 30))
+    recompute_lockup_analysis(db, lockup, security)
+    base = next(r for r in _audit(db) if r.observation_offset == -5)
+    rows = [
+        replace(base, snapshot_id=101, mismatch_type="exact_match"),
+        replace(base, snapshot_id=102, mismatch_type="event_session_mismatch",
+                event_session_match=False, old_bar_offset_reproduced=True,
+                missing_expected_sessions=(base.canonical_event_trade_date,)),
+        replace(base, snapshot_id=103,
+                mismatch_type="observation_session_mismatch_sparse_history",
+                observation_session_match=False, old_bar_offset_reproduced=True,
+                missing_expected_sessions=(base.canonical_observation_date,)),
+        replace(base, snapshot_id=104,
+                mismatch_type="observation_session_mismatch_unexplained",
+                observation_session_match=False),
+        replace(base, snapshot_id=105,
+                mismatch_type="event_and_observation_mismatch",
+                event_session_match=False, observation_session_match=False),
+        replace(base, snapshot_id=106, mismatch_type="missing_required_fields"),
+    ]
+    report = summarize_session_parity(db, rows)
+    assert report["observation_sparse_history_cases"] == 1
+    assert report["sparse_market_history_cases"] == 1
+    assert report["observation_session_mismatches"] == 2
+    assert report["observation_session_mismatches_unexplained"] == 1
+    assert report["event_session_mismatches"] == 1
+    assert report["event_and_observation_mismatches"] == 1
+    assert report["total_session_mismatches"] == 4
+    assert report["missing_required_fields"] == 1
+    assert report["sparse_data_related_mismatches"] == 2
     db.close()
 
 
