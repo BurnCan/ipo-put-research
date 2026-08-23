@@ -67,7 +67,7 @@ def test_session_boundaries_and_invalid_offset_origin():
 @pytest.mark.parametrize(("event_date", "observation"), [
     (date(2024, 3, 11), date(2024, 3, 4)),
     (date(2024, 7, 8), date(2024, 6, 28)),
-    (date(2025, 1, 3), date(2024, 12, 24)),
+    (date(2025, 1, 3), date(2024, 12, 26)),
 ])
 def test_exact_fifth_prior_exchange_session(event_date, observation):
     result = resolve_observation_session(event_date, -5)

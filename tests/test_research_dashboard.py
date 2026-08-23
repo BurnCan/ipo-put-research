@@ -158,7 +158,47 @@ def test_stored_prospective_signal_t5_date_is_authoritative():
         row = next(row for row in get_upcoming_lockups(db)
                    if row["lockup_id"] == signaled_id)
         assert row["minus5_observation_date"] == CUTOFF - timedelta(days=1)
+        assert row["required_t5_date"] == CUTOFF + timedelta(days=2)
+        assert row["signal_observation_date"] == CUTOFF + timedelta(days=2)
         assert row["t5_observation_date"] == CUTOFF + timedelta(days=2)
+    finally:
+        db.close()
+
+
+def test_stored_prospective_required_t5_date_takes_precedence():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        signal.observation_date = CUTOFF + timedelta(days=2)
+        signal.required_observation_date = CUTOFF + timedelta(days=3)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == signaled_id)
+        assert row["required_t5_date"] == CUTOFF + timedelta(days=3)
+        assert row["signal_observation_date"] == CUTOFF + timedelta(days=2)
+        assert row["stored_t5_snapshot_date"] == CUTOFF - timedelta(days=1)
+        assert row["t5_observation_date"] == CUTOFF + timedelta(days=3)
+    finally:
+        db.close()
+
+
+def test_lifecycle_unavailable_uses_stored_required_t5_date():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        missed_id = _add_lockup(db, 7, CUTOFF, "unavailable",
+                                "observation_before_prospective_start")
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == missed_id))
+        signal.required_observation_date = CUTOFF - timedelta(days=3)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == missed_id)
+        assert row["required_t5_date"] == CUTOFF - timedelta(days=3)
+        assert row["signal_observation_date"] == CUTOFF
+        assert row["stored_t5_snapshot_date"] == CUTOFF
     finally:
         db.close()
 
