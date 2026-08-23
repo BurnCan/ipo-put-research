@@ -1133,6 +1133,14 @@ XNYS `exchange_calendars` service, reports missing bars and whether the old
 stored-bar offset is reproducible, and measures exposure in the frozen M7
 discovery cohort.
 
+Each detail row distinguishes exact matches, event-only mismatches,
+sparse-history observation mismatches, unexplained observation mismatches,
+combined event/observation mismatches, and missing required fields. The summary's
+`sparse_market_history_cases` and `unexplained_mismatches` counters are totals of
+those corresponding row classifications. M7 canonical features are reported as
+recomputable only when all 21 canonical sessions needed by the existing M6
+20-session return and realized-volatility formulas are stored through T-5.
+
 The audit does **not** rewrite M6 snapshots, M7 evidence or thresholds, or M8
 prospective signals. A later, explicitly versioned recalculation can be considered
 only after this impact has been measured.
