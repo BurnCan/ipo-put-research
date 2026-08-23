@@ -4,7 +4,8 @@ from datetime import date
 import pytest
 
 from app.services.market_calendar import (
-    CALENDAR_ID, CALENDAR_PROVIDER, is_session, resolve_event_session,
+    CALENDAR_END, CALENDAR_ID, CALENDAR_PROVIDER, CALENDAR_START,
+    MarketCalendarDateOutOfBounds, is_session, resolve_event_session,
     resolve_observation_session, session_offset, session_on_or_after,
     session_on_or_before,
 )
@@ -17,6 +18,28 @@ def test_calendar_identity_and_normal_session():
     assert result.calendar_id == CALENDAR_ID == "XNYS"
     assert result.calendar_provider == CALENDAR_PROVIDER == "exchange_calendars"
     assert result.calendar_version
+
+
+def test_calendar_has_fixed_research_horizon():
+    assert CALENDAR_START == date(1990, 1, 1)
+    assert CALENDAR_END == date(2035, 12, 31)
+
+
+@pytest.mark.parametrize("event_date", [date(2026, 8, 24), date(2027, 8, 23)])
+def test_calendar_covers_current_and_future_m8_dates(event_date):
+    assert resolve_event_session(event_date).event_session >= event_date
+
+
+@pytest.mark.parametrize("event_date", [date(1989, 12, 31), date(2036, 1, 1)])
+def test_date_outside_fixed_research_horizon_raises_clear_error(event_date):
+    with pytest.raises(MarketCalendarDateOutOfBounds) as exc_info:
+        resolve_event_session(event_date)
+
+    message = str(exc_info.value)
+    assert str(event_date) in message
+    assert CALENDAR_ID in message
+    assert str(CALENDAR_START) in message
+    assert str(CALENDAR_END) in message
 
 
 @pytest.mark.parametrize(("event_date", "session"), [
