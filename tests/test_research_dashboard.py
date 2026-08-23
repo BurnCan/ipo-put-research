@@ -20,7 +20,8 @@ from app.services import research_dashboard
 CUTOFF = date(2026, 8, 23)
 
 
-def _add_lockup(db, number, observation_date=None, signal_status=None):
+def _add_lockup(db, number, observation_date=None, signal_status=None,
+                unavailable_reason=None):
     ticker = f"T{number}"
     company = Company(cik=f"{number:010d}", name=f"Company {number}", ticker=ticker)
     filing = Filing(company=company, form_type="424B4", filed_at=date(2026, 1, 2),
@@ -61,7 +62,10 @@ def _add_lockup(db, number, observation_date=None, signal_status=None):
             feature2_name=spec.feature2, feature2_value=.9,
             feature2_threshold=spec.feature2_threshold, feature2_side="high",
             interaction_group="low_high", is_high_high=False,
-            signal_status=signal_status, evaluation_mode="prospective"))
+            signal_status=signal_status,
+            unavailable_reason=unavailable_reason,
+            evaluation_mode=("lifecycle_tracking" if signal_status == "unavailable"
+                             else "prospective")))
     db.flush()
     return lockup.id
 
@@ -164,6 +168,31 @@ def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels
     assert "HISTORICAL DISCOVERY SAMPLE · NOT OUT-OF-SAMPLE" in page
     assert "No prospective M8 signals have been frozen yet." in page
     assert "No prospective outcomes have matured yet." in page
+    assert "Not eligible prospectively" in page
+    assert "T-5 observation predates hypothesis freeze" in page
+
+
+def test_dashboard_separates_missed_t5_window_from_waiting_and_history():
+    db, historical_id, pending_id, signaled_id = _dashboard_database()
+    try:
+        missed_id = _add_lockup(
+            db, 5, CUTOFF,
+            "unavailable", "observation_before_prospective_start")
+        db.commit()
+
+        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db)}
+        assert rows[missed_id]["m8_status"] == "unavailable"
+        assert rows[missed_id]["t5_timing_status"] == \
+            "observation_before_prospective_start"
+        assert rows[pending_id]["m8_status"] == "pending_observation"
+        assert historical_id not in rows
+        summary = get_research_summary(db)
+        assert summary["missed_t5_window"] == 1
+        assert summary["pending_observation"] == 1
+        assert summary["historical_unavailable"] == 1
+        assert summary["prospective_signals"] == 1
+    finally:
+        db.close()
 
 
 def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():

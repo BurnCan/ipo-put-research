@@ -8,6 +8,10 @@ from app.models import (Company, DailyPrice, IPO, IPOLockup, LockupEventAnalysis
                         LockupProspectiveSignal, LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import OUTCOME_VERSION, SNAPSHOT_VERSION
+from app.services.event_analysis.sessions import (align_event_trade_date,
+                                                   get_trading_session_offset)
+
+OBSERVATION_BEFORE_PROSPECTIVE_START = "observation_before_prospective_start"
 
 
 @dataclass
@@ -27,6 +31,7 @@ class ProspectiveReport:
     matured: int = 0
     already_current: int = 0
     unavailable: int = 0
+    unavailable_observation_before_cutoff: int = 0
     errors: int = 0
 
     def to_dict(self): return asdict(self)
@@ -41,6 +46,52 @@ def _status(row, outcome):
     if outcome and outcome.post_20d_return is not None: return "matured"
     if row.event_trade_date is None: return "awaiting_event"
     return "awaiting_outcome"
+
+
+def _required_observation_date(db, lockup, ipo, snapshot, offset):
+    """Resolve the exact session with M6 alignment only; never project a calendar."""
+    if snapshot is not None:
+        return snapshot.observation_date, snapshot.security_id
+    alignment = db.scalar(select(LockupSignalSnapshot).where(
+        LockupSignalSnapshot.lockup_id == lockup.id,
+        LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION,
+        LockupSignalSnapshot.event_trade_date.is_not(None)).order_by(LockupSignalSnapshot.id))
+    outcome = None
+    if alignment is None:
+        outcome = db.scalar(select(LockupEventAnalysis).where(
+            LockupEventAnalysis.lockup_id == lockup.id,
+            LockupEventAnalysis.outcome_version == OUTCOME_VERSION,
+            LockupEventAnalysis.event_trade_date.is_not(None)).order_by(LockupEventAnalysis.id))
+    security_id = alignment.security_id if alignment else outcome.security_id if outcome else None
+    event_trade_date = (alignment.event_trade_date if alignment else
+                        outcome.event_trade_date if outcome else None)
+    if security_id is None:
+        security = db.scalar(select(Security).where(
+            Security.company_id == ipo.company_id,
+            Security.is_primary.is_(True)).order_by(Security.id))
+        security_id = security.id if security else None
+    if security_id is None:
+        return None, None
+    bars = list(db.scalars(select(DailyPrice).where(
+        DailyPrice.security_id == security_id).order_by(DailyPrice.trade_date)))
+    if event_trade_date is None:
+        event_trade_date = align_event_trade_date(bars, _event_date(lockup))
+    observation = (get_trading_session_offset(bars, event_trade_date, offset)
+                   if event_trade_date is not None else None)
+    return (observation.trade_date if observation else None), security_id
+
+
+def _unavailable_row(spec, hypothesis_id, ipo, lockup, event_date,
+                     observation_date, security_id):
+    return LockupProspectiveSignal(
+        hypothesis_id=hypothesis_id, hypothesis_version=spec.analysis_version,
+        ipo_id=ipo.id, lockup_id=lockup.id, security_id=security_id,
+        observation_offset=spec.observation_offset, observation_date=observation_date,
+        event_date=event_date, feature1_name=spec.feature1,
+        feature1_threshold=spec.feature1_threshold, feature2_name=spec.feature2,
+        feature2_threshold=spec.feature2_threshold, is_high_high=False,
+        signal_status="unavailable", unavailable_reason=OBSERVATION_BEFORE_PROSPECTIVE_START,
+        evaluation_mode="lifecycle_tracking")
 
 
 def update_prospective_lockup_signals(db, *, hypothesis_id, classification_status="classified",
@@ -78,10 +129,27 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, classification_statu
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
+        # Any previously frozen prospective evidence wins over later lifecycle
+        # reconstruction, including an older M6 snapshot.
+        if existing is not None and existing.signal_status == "unavailable":
+            report.unavailable += 1
+            report.unavailable_observation_before_cutoff += int(
+                existing.unavailable_reason == OBSERVATION_BEFORE_PROSPECTIVE_START)
+            report.already_current += 1
+            continue
+        required_date, required_security_id = _required_observation_date(
+            db, lockup, ipo, snapshot, spec.observation_offset)
         # Observations through the hypothesis freeze date belong to discovery,
         # never prospective; only strictly later snapshots are out-of-sample.
-        if existing is None and snapshot is not None and snapshot.observation_date <= spec.prospective_start_date:
-            report.unavailable += 1; continue
+        if existing is None and required_date is not None and required_date <= spec.prospective_start_date:
+            report.unavailable += 1
+            if event_date > spec.prospective_start_date:
+                report.unavailable_observation_before_cutoff += 1
+                if not dry_run:
+                    db.add(_unavailable_row(spec, hypothesis_id, ipo, lockup, event_date,
+                                            required_date, required_security_id))
+                    db.flush()
+            continue
         if existing is None and (snapshot is None or getattr(snapshot, spec.feature1) is None or
                                  getattr(snapshot, spec.feature2) is None):
             report.pending_observation += 1; continue

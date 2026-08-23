@@ -1074,6 +1074,13 @@ date admitted to evaluation. Observations on or before the 2026-08-23 cutoff
 are historical and excluded rather than backfilled; only observations strictly
 after the cutoff are eligible for prospective evaluation.
 
+A future lockup can nevertheless be ineligible when its exact required T-5
+session occurred on or before that cutoff. M8 records this expected lifecycle
+outcome separately from events genuinely waiting for T-5; it is neither an
+error nor a prospective signal. The date is accepted only from an existing M6
+snapshot or M6's stored-market-session alignment—M8 never guesses it with
+calendar or weekday subtraction.
+
 Evaluate genuine prospective rows only:
 
 ```bash
