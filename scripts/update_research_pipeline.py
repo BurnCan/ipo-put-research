@@ -15,6 +15,9 @@ from time import monotonic
 from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 DEFAULT_LOCK_FILE = PROJECT_ROOT / "data" / "update_research_pipeline.lock"
 FROZEN_HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 COHORT = {
