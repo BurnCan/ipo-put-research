@@ -6,6 +6,7 @@ from sqlalchemy import inspect, select
 from app.models import (LockupEventAnalysis, LockupProspectiveSignal,
                         LockupSignalSnapshot)
 from app.services.event_analysis.analysis import recompute_lockup_analysis
+from app.services.event_analysis.constants import SNAPSHOT_OFFSETS, SNAPSHOT_VERSION
 from app.services.event_analysis.session_parity import (audit_m6_session_parity,
                                                          mismatching_session_parity_rows,
                                                          summarize_session_parity)
@@ -44,7 +45,13 @@ def test_exact_match_multiple_offsets_and_stated_date_precedence():
     lockup.calculated_expiration_date = date(2026, 8, 3)
     recompute_lockup_analysis(db, lockup, security)
     rows = _audit(db)
-    assert [r.observation_offset for r in rows] == [-5, -1]
+    audited_offsets = [r.observation_offset for r in rows]
+    creatable_offsets = [offset for offset in SNAPSHOT_OFFSETS
+                         if abs(offset) < len(dates)]
+    assert len(audited_offsets) > 1
+    assert {-5, -1}.issubset(audited_offsets)
+    assert audited_offsets == sorted(audited_offsets)
+    assert audited_offsets == creatable_offsets
     assert all(r.mismatch_type == "exact_match" for r in rows)
     assert all((r.event_date, r.event_date_source) == (event, "stated") for r in rows)
 
@@ -83,9 +90,11 @@ def _canonical_sessions_ending(day, count):
     return list(reversed(dates))
 
 
-def _snapshot(db, offset=-5):
+def _snapshot(db):
     return db.scalar(select(LockupSignalSnapshot).where(
-        LockupSignalSnapshot.observation_offset == offset))
+        LockupSignalSnapshot.observation_offset == -5,
+        LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION,
+    ).order_by(LockupSignalSnapshot.id))
 
 
 def test_each_row_level_mismatch_class_and_mismatch_selection():
@@ -127,7 +136,8 @@ def test_each_row_level_mismatch_class_and_mismatch_selection():
 
 def test_missing_required_fields_ticker_lockup_filters_and_ordering():
     event = date(2026, 7, 29)
-    db, lockup, security = analysis_database(event, _canonical_sessions_ending(event, 30))
+    dates = _canonical_sessions_ending(event, 30)
+    db, lockup, security = analysis_database(event, dates)
     recompute_lockup_analysis(db, lockup, security)
     lockup.stated_expiration_date = None
     lockup.calculated_expiration_date = None
@@ -149,7 +159,13 @@ def test_missing_required_fields_ticker_lockup_filters_and_ordering():
         primary_lockup_only=False, lockup_id=lockup.id + 999) == []
     assert rows == sorted(rows, key=lambda r: ((r.ticker or ""), r.lockup_id,
                                                r.observation_offset, r.snapshot_id))
-    assert [r.observation_offset for r in rows] == [-5, -1]
+    audited_offsets = [r.observation_offset for r in rows]
+    creatable_offsets = [offset for offset in SNAPSHOT_OFFSETS
+                         if abs(offset) < len(dates)]
+    assert len(audited_offsets) > 1
+    assert {-5, -1}.issubset(audited_offsets)
+    assert audited_offsets == sorted(audited_offsets)
+    assert audited_offsets == creatable_offsets
     db.close()
 
 
@@ -157,8 +173,13 @@ def _discovery_report(*, omit_required_session=False):
     event = date(2026, 7, 29)
     observation = session_offset(event, -5)
     required = _canonical_sessions_ending(observation, 21)
-    dates = required + _canonical_sessions_ending(event, 5)[1:]
+    # Include every canonical session from the 21-bar feature window through the
+    # event.  M6 selects its observation by stored-bar position, so omitting T-4
+    # would shift its -5 snapshot back one row and leave only 20 feature bars.
+    dates = required + _canonical_sessions_ending(event, 6)[1:]
     if omit_required_session:
+        # Preserve 21 historical stored bars through T-5 for the legacy M6
+        # calculation, while making its exact canonical feature window incomplete.
         dates.remove(required[7])
         dates.insert(0, session_offset(required[0], -1))
     db, lockup, security = analysis_database(event, dates)
