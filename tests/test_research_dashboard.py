@@ -1,5 +1,7 @@
 """Offline checks for the read-only research dashboard projection."""
+import ast
 from datetime import date, timedelta
+import inspect
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
@@ -211,6 +213,39 @@ def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
                 + summary["prospective_signals"] == summary["eligible_lockups"])
     finally:
         db.close()
+
+
+def test_summary_injected_date_matches_upcoming_lifecycle_projection():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        lockup_id = _add_lockup(db, 6)
+        db.commit()
+
+        for today, expected in (
+                (date(2026, 8, 23), "pending_observation"),
+                (date(2026, 8, 24), "waiting_for_market_data"),
+                (date(2026, 8, 25), "waiting_for_market_data")):
+            upcoming = next(row for row in get_upcoming_lockups(db, today=today)
+                            if row["lockup_id"] == lockup_id)
+            summary = get_research_summary(db, today=today)
+
+            assert upcoming["required_t5_date"] == date(2026, 8, 24)
+            assert upcoming["m8_status"] == expected
+            assert summary[expected] == 2
+    finally:
+        db.close()
+
+
+def test_summary_resolves_today_once_outside_its_classification_loop():
+    tree = ast.parse(inspect.getsource(get_research_summary))
+    loops = [node for node in ast.walk(tree) if isinstance(node, ast.For)]
+
+    assert len(loops) == 1
+    assert not any(isinstance(node, ast.Call) and
+                   isinstance(node.func, ast.Attribute) and
+                   isinstance(node.func.value, ast.Name) and
+                   node.func.value.id == "date" and node.func.attr == "today"
+                   for node in ast.walk(loops[0]))
 
 
 def test_summary_historical_count_is_computed_from_frozen_state_not_upcoming(monkeypatch):
