@@ -6,6 +6,11 @@ from app.db import get_db
 from app.models import (Company, DailyPrice, Filing, FilingDocument, IPO, IPOFact, IPOLockup,
                         IPOMarketSummary, LockupEventAnalysis, LockupSignalSnapshot)
 from app.services.ipo_ingest import ingest_registration_filings
+from app.services.research_dashboard import (
+    GROUPS, get_historical_reference, get_prospective_evaluation,
+    get_prospective_signal_rows, get_research_summary, get_upcoming_lockups,
+    hypothesis_metadata,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -34,6 +39,44 @@ def _analysis_dict(row):
 @router.get("/health")
 def health():
     return {"ok": True}
+
+
+@router.get("/research/hypothesis")
+def research_hypothesis():
+    return hypothesis_metadata()
+
+
+@router.get("/research/summary")
+def research_summary(db: Session = Depends(get_db)):
+    return get_research_summary(db)
+
+
+@router.get("/research/upcoming-lockups")
+def research_upcoming_lockups(db: Session = Depends(get_db)):
+    return get_upcoming_lockups(db)
+
+
+@router.get("/research/prospective-signals")
+def research_prospective_signals(
+    status: str | None = None,
+    interaction_group: str | None = Query(None),
+    ticker: str | None = None,
+    db: Session = Depends(get_db),
+):
+    if interaction_group is not None and interaction_group not in GROUPS:
+        raise HTTPException(status_code=422, detail="unknown interaction group")
+    return get_prospective_signal_rows(db, status=status,
+                                       interaction_group=interaction_group, ticker=ticker)
+
+
+@router.get("/research/prospective-evaluation")
+def research_prospective_evaluation(db: Session = Depends(get_db)):
+    return get_prospective_evaluation(db)
+
+
+@router.get("/research/historical-reference")
+def research_historical_reference(db: Session = Depends(get_db)):
+    return get_historical_reference(db)
 
 
 @router.get("/ipos")
