@@ -1,4 +1,5 @@
 import argparse, json, sys
+from datetime import date
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
@@ -14,6 +15,8 @@ def main():
     p.add_argument("--primary-lockup-only", action="store_true", default=True)
     p.add_argument("--ticker"); p.add_argument("--ipo-id", type=int); p.add_argument("--limit", type=int)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--as-of-date", type=date.fromisoformat,
+                   help="Inject lifecycle date (YYYY-MM-DD); defaults to today")
     with SessionLocal() as db: report = update_prospective_lockup_signals(db, **vars(p.parse_args()))
     print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
 if __name__ == "__main__": main()

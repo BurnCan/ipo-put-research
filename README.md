@@ -2,6 +2,24 @@
 
 A local research prototype for discovering recent U.S. IPO candidates from SEC EDGAR registration filings, storing them in PostgreSQL, and browsing them through a FastAPI dashboard.
 
+## Hybrid US-equities calendar model
+
+M8 separates expected session identity from observed market data. The offline
+`exchange_calendars` **XNYS** calendar determines when a canonical US-equities
+session (including the exact T-5 session) should occur; `DailyPrice` rows
+independently determine whether market data actually exists for that session.
+A calendar-derived date therefore never implies that a bar or M6 snapshot is
+available.
+
+This lets M8 resolve T-5 before a future lockup occurs. Future lockups whose
+T-5 is on or before the frozen prospective cutoff are immediately recorded as
+prospectively unavailable. For eligible events, M8 distinguishes a T-5 that
+has not yet arrived from a T-5 whose market data is still missing. Existing M6
+snapshots and genuine frozen M8 signals remain authoritative and are not
+rewritten; disagreements with XNYS are reported for review. XNYS is the v1
+canonical US-equities calendar. Exchange-specific and foreign calendars are a
+future extension.
+
 ## Current capabilities
 
 - Downloads SEC EDGAR quarterly `master.idx` files.

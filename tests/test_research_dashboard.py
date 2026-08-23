@@ -127,7 +127,7 @@ def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():
         db.close()
 
 
-def test_upcoming_rows_are_sorted_and_t5_date_is_never_guessed():
+def test_upcoming_rows_are_sorted_and_required_t5_is_calendar_derived():
     db, historical_id, pending_id, signaled_id = _dashboard_database()
     try:
         no_snapshot_id = _add_lockup(db, 4)
@@ -136,7 +136,9 @@ def test_upcoming_rows_are_sorted_and_t5_date_is_never_guessed():
         assert [row["lockup_event_date"] for row in rows] == sorted(
             row["lockup_event_date"] for row in rows)
         row = next(row for row in rows if row["lockup_id"] == no_snapshot_id)
-        assert row["t5_observation_date"] is None
+        assert row["required_t5_date"] == date(2026, 8, 24)
+        assert row["stored_t5_snapshot_date"] is None
+        assert row["calendar_id"] == "XNYS"
         assert row["t5_snapshot_available"] is False
         assert row["t5_timing_status"] == "waiting_for_t5"
         assert row["m8_status"] == "pending_observation"
