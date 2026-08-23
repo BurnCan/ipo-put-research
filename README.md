@@ -1122,3 +1122,53 @@ The SEC asks automated clients to identify themselves and comply with its fair-a
 ## Disclaimer
 
 This project is a research prototype. It does not provide investment advice and does not currently submit trades.
+
+## M6 canonical-session parity audit
+
+Historical M6 snapshots treated the available `DailyPrice` rows as trading-session
+identity. Consequently, sparse stored history can shift an offset such as T-5 away
+from the exact fifth exchange session. The read-only parity audit compares the
+stored event and observation dates with the expected sessions from the canonical
+XNYS `exchange_calendars` service, reports missing bars and whether the old
+stored-bar offset is reproducible, and measures exposure in the frozen M7
+discovery cohort.
+
+Each detail row distinguishes exact matches, event-only mismatches,
+sparse-history observation mismatches, unexplained observation mismatches,
+combined event/observation mismatches, and missing required fields. Summary
+counters retain that separation: `observation_sparse_history_cases` counts only
+observation-session mismatches reproduced from sparse stored-bar history;
+event-only and combined mismatches have their own counters. The deprecated
+`sparse_market_history_cases` name remains as an observation-only compatibility
+alias. `total_session_mismatches` is the sum of event-only, observation-only
+(both sparse and unexplained), and combined session-identity mismatches; it
+excludes exact matches and rows with missing required fields.
+
+`sparse_data_related_mismatches` is a separate, evidence-based aggregate. It
+requires both missing expected sessions and reproduction of the legacy stored-bar
+offset; an event mismatch additionally requires that its canonical event session
+is missing. It never infers sparse history from a date mismatch alone. Thus a
+live result can be read as distinct exact matches, observation mismatches, event
+mismatches, and combined mismatches, while the total reconciles the three
+mismatch categories without obscuring their causes.
+
+The M7 impact summary reports the mismatch rate and includes each affected
+discovery event's actual T-5 mismatch type. M7 canonical features are reported
+as recomputable only when all 21 exact XNYS sessions needed by the existing M6
+20-session return and realized-volatility formulas are stored through T-5.
+
+The audit does **not** rewrite M6 snapshots, M7 evidence or thresholds, or M8
+prospective signals. A later, explicitly versioned recalculation can be considered
+only after this impact has been measured.
+
+```bash
+python scripts/audit_m6_session_parity.py \
+  --classification-status classified \
+  --candidate-type operating_company_ipo \
+  --offering-status priced \
+  --primary-lockup-only \
+  --mismatches-only
+```
+
+Use `--details` for all rows, `--ticker`, `--ipo-id`, or `--lockup-id` to narrow
+the cohort, and optional `--output path.csv` to export the selected detail rows.
