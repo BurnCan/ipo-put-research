@@ -211,6 +211,23 @@ def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
         db.close()
 
 
+def test_summary_historical_count_is_computed_from_frozen_state_not_upcoming(monkeypatch):
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        monkeypatch.setattr(research_dashboard, "get_upcoming_lockups",
+                            lambda db: (_ for _ in ()).throw(AssertionError(
+                                "summary must classify the cohort explicitly")))
+
+        summary = get_research_summary(db)
+
+        assert summary["historical_unavailable"] == 1
+        assert (summary["historical_unavailable"] + summary["missed_t5_window"] +
+                summary["pending_observation"] + summary["prospective_signals"] ==
+                summary["eligible_lockups"])
+    finally:
+        db.close()
+
+
 def test_historical_reference_still_uses_frozen_discovery_rows(monkeypatch):
     captured = {}
     dataset = [
