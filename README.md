@@ -946,6 +946,44 @@ M6 point-in-time snapshots/outcomes
 M7 backtest dataset + signal analysis
 ```
 
+## Milestone 8: prospective validation
+
+M7 is historical discovery; M8 is prospective validation. The sole frozen
+hypothesis is `m7_return20_vol20_minus5_post20`: `return_20d` and
+`realized_vol_20d` at trading-session offset `-5`, evaluated against
+`post_20d_return` with median grouping thresholds frozen from the discovery
+cohort. Those thresholds are stored in the specification and prospective
+observations can never update them.
+
+Advance the lifecycle from stored, point-in-time M6 snapshots and outcomes:
+
+```bash
+python scripts/update_prospective_signals.py \
+  --hypothesis-id m7_return20_vol20_minus5_post20
+
+python scripts/update_prospective_signals.py \
+  --hypothesis-id m7_return20_vol20_minus5_post20 \
+  --dry-run
+```
+
+Dry-run reports pending work without database writes. Normal runs permanently
+copy the first eligible M6 `-5` snapshot, classify equality as low, and never
+refresh those signal fields. A later run may attach the stored M6 +20 outcome
+without changing the original classification. Events before the explicit
+2026-08-23 prospective start date are excluded rather than backfilled.
+
+Evaluate genuine prospective rows only:
+
+```bash
+python scripts/evaluate_prospective_signals.py \
+  --hypothesis-id m7_return20_vol20_minus5_post20
+```
+
+Historical M7 rows are not out-of-sample, and leave-one-out robustness is not
+out-of-sample validation. M8 rows are the first genuine out-of-sample test.
+The report is descriptive and does not retrain, search thresholds, produce a
+recommendation, or evaluate an options strategy.
+
 ## Later milestones
 
 Options backtesting, benchmark adjustment, scoring, and trading execution are not implemented.

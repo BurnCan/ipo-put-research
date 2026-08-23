@@ -48,7 +48,16 @@ def upgrade_milestone_3(engine: Engine) -> list[str]:
 
 def upgrade_schema(engine: Engine) -> list[str]:
     return (upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine)
-            + upgrade_milestone_5(engine) + upgrade_milestone_6(engine))
+            + upgrade_milestone_5(engine) + upgrade_milestone_6(engine) + upgrade_milestone_8(engine))
+
+
+def upgrade_milestone_8(engine: Engine) -> list[str]:
+    """Create the append-only prospective validation table."""
+    from app.models import LockupProspectiveSignal
+    if LockupProspectiveSignal.__tablename__ in set(inspect(engine).get_table_names()):
+        return []
+    LockupProspectiveSignal.__table__.create(engine, checkfirst=True)
+    return [LockupProspectiveSignal.__tablename__]
 
 
 def upgrade_milestone_6(engine: Engine) -> list[str]:
