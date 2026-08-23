@@ -94,6 +94,13 @@ def get_upcoming_lockups(db, *, today=None):
                 snapshot.observation_date <= spec.prospective_start_date:
             continue
         status = signal.signal_status if signal else "pending_observation"
+        # Stored market-session observations are the only valid T-5 dates.
+        # M8 is authoritative when a genuine prospective signal exists.
+        t5_observation_date = (signal.observation_date if signal else
+                               snapshot.observation_date if snapshot else None)
+        t5_timing_status = ("signal_frozen" if signal else
+                            "t5_snapshot_available" if snapshot else
+                            "waiting_for_t5")
         result.append({"ipo_id": ipo.id, "lockup_id": lockup.id,
             "company_name": company.name, "ticker": company.ticker, "ipo_date": ipo.ipo_date,
             "lockup_event_date": event_date,
@@ -103,6 +110,9 @@ def get_upcoming_lockups(db, *, today=None):
             "latest_market_date": latest, "m8_status": status,
             "has_minus5_snapshot": snapshot is not None,
             "minus5_observation_date": snapshot.observation_date if snapshot else None,
+            "t5_observation_date": t5_observation_date,
+            "t5_snapshot_available": snapshot is not None,
+            "t5_timing_status": t5_timing_status,
             "return_20d_at_minus5": float(snapshot.return_20d) if snapshot and snapshot.return_20d is not None else None,
             "realized_vol_20d_at_minus5": float(snapshot.realized_vol_20d) if snapshot and snapshot.realized_vol_20d is not None else None,
             "interaction_group": signal.interaction_group if signal else None,

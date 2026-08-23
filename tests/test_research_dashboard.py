@@ -2,7 +2,7 @@
 from datetime import date, timedelta
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -113,11 +113,57 @@ def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():
 
         assert historical_id not in rows
         assert rows[pending_id]["m8_status"] == "pending_observation"
+        assert rows[pending_id]["t5_timing_status"] == "t5_snapshot_available"
+        assert rows[pending_id]["t5_observation_date"] == date(2026, 8, 24)
         assert rows[signaled_id]["m8_status"] == "awaiting_event"
+        assert rows[signaled_id]["t5_timing_status"] == "signal_frozen"
         assert rows[signaled_id]["minus5_observation_date"] == date(2026, 8, 22)
         assert all(row["m8_status"] != "unavailable_historical" for row in rows.values())
     finally:
         db.close()
+
+
+def test_upcoming_rows_are_sorted_and_t5_date_is_never_guessed():
+    db, historical_id, pending_id, signaled_id = _dashboard_database()
+    try:
+        no_snapshot_id = _add_lockup(db, 4)
+        db.commit()
+        rows = get_upcoming_lockups(db, today=CUTOFF)
+        assert [row["lockup_event_date"] for row in rows] == sorted(
+            row["lockup_event_date"] for row in rows)
+        row = next(row for row in rows if row["lockup_id"] == no_snapshot_id)
+        assert row["t5_observation_date"] is None
+        assert row["t5_snapshot_available"] is False
+        assert row["t5_timing_status"] == "waiting_for_t5"
+        assert row["m8_status"] == "pending_observation"
+    finally:
+        db.close()
+
+
+def test_stored_prospective_signal_t5_date_is_authoritative():
+    db, historical_id, pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        signal.observation_date = CUTOFF + timedelta(days=2)
+        db.commit()
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == signaled_id)
+        assert row["minus5_observation_date"] == CUTOFF - timedelta(days=1)
+        assert row["t5_observation_date"] == CUTOFF + timedelta(days=2)
+    finally:
+        db.close()
+
+
+def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels():
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+    assert "UPCOMING_INITIAL_LIMIT=10" in page
+    assert 'aria-expanded="false"' in page
+    assert "Show fewer" in page and "Show all ${xs.length}" in page
+    assert "prospective-side ${xs.length===1?'event':'events'}" in page
+    assert "HISTORICAL DISCOVERY SAMPLE · NOT OUT-OF-SAMPLE" in page
+    assert "No prospective M8 signals have been frozen yet." in page
+    assert "No prospective outcomes have matured yet." in page
 
 
 def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
