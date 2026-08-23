@@ -14,6 +14,30 @@ A local research prototype for discovering recent U.S. IPO candidates from SEC E
 - Conservatively classifies candidates from stored SEC filing chronology and associates a plausible final `424B4`.
 - Caches associated final prospectuses and extracts conservative offering facts and agreement-level lockups with provenance.
 
+## Lockup research dashboard
+
+Run the application and open the dashboard at <http://127.0.0.1:8000/>:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+The root page presents the immutable frozen hypothesis, clean-cohort upcoming
+lockups, frozen prospective signals and their lifecycle, prospective group
+evaluation, and a separately identified historical discovery reference.
+Historical discovery results are **not out-of-sample**; M8 prospective
+observations are kept separate.
+
+The dashboard uses these deterministic, read-only research endpoints:
+
+- `GET /api/research/hypothesis`
+- `GET /api/research/summary`
+- `GET /api/research/upcoming-lockups`
+- `GET /api/research/prospective-signals` (optional `status`,
+  `interaction_group`, and `ticker` filters)
+- `GET /api/research/prospective-evaluation`
+- `GET /api/research/historical-reference`
+
 > **Prototype status:** classifications are heuristic research labels based only on SEC filing metadata, not authoritative legal determinations. Registration statements can represent many transaction types, so uncertain or contradictory cases intentionally remain `unknown` / `needs_review`.
 
 ## Research pipeline
