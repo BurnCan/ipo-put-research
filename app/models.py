@@ -329,4 +329,46 @@ class LockupEventAnalysis(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class LockupProspectiveSignal(Base):
+    """Immutable point-in-time M8 classification plus a later, separate outcome."""
+    __tablename__ = "lockup_prospective_signals"
+    __table_args__ = (
+        UniqueConstraint("hypothesis_id", "hypothesis_version", "lockup_id",
+                         name="uq_prospective_hypothesis_lockup"),
+        Index("ix_prospective_hypothesis_status", "hypothesis_id", "signal_status"),
+        Index("ix_prospective_event_date", "event_date"),
+        Index("ix_prospective_group", "interaction_group"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hypothesis_id: Mapped[str] = mapped_column(String(80), index=True)
+    hypothesis_version: Mapped[str] = mapped_column(String(32))
+    ipo_id: Mapped[int] = mapped_column(ForeignKey("ipos.id", ondelete="CASCADE"), index=True)
+    lockup_id: Mapped[int] = mapped_column(ForeignKey("ipo_lockups.id", ondelete="CASCADE"), index=True)
+    security_id: Mapped[int | None] = mapped_column(ForeignKey("securities.id", ondelete="CASCADE"), nullable=True)
+    observation_offset: Mapped[int] = mapped_column(Integer)
+    observation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    event_date: Mapped[date] = mapped_column(Date)
+    event_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    feature1_name: Mapped[str] = mapped_column(String(40))
+    feature1_value: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    feature1_threshold: Mapped[float] = mapped_column(Numeric(20, 10))
+    feature2_name: Mapped[str] = mapped_column(String(40))
+    feature2_value: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    feature2_threshold: Mapped[float] = mapped_column(Numeric(20, 10))
+    feature1_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    feature2_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    interaction_group: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    is_high_high: Mapped[bool] = mapped_column(Boolean, default=False)
+    signal_status: Mapped[str] = mapped_column(String(32), index=True)
+    evaluation_mode: Mapped[str] = mapped_column(String(24), default="prospective", index=True)
+    realized_outcome_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    realized_outcome_value: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    outcome_observation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    outcome_attached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bearish_mfe_20d: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    bearish_mae_20d: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 Index("ix_ipo_status_first_filing", IPO.status, IPO.first_filing_date)

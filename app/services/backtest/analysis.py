@@ -5,6 +5,7 @@ import math
 import statistics
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from datetime import date
 
 from .dataset import FEATURE_COLUMNS, OUTCOME_COLUMNS
 
@@ -13,18 +14,29 @@ STANDARD_OFFSETS = (-60, -40, -20, -10, -5, -1)
 
 @dataclass(frozen=True)
 class FrozenHypothesis:
-    """Stable, non-database identity for a prospectively testable hypothesis."""
+    """Stable, non-database identity for a prospectively testable hypothesis.
+
+    ``prospective_start_date`` is the inclusive historical cutoff (the date the
+    hypothesis was frozen), not the first observation date admitted to M8.
+    Prospective observations must be strictly later than this date.
+    """
     feature1: str
     feature2: str
     outcome: str
     observation_offset: int
     grouping_rule: str = "median_split"
     analysis_version: str = "m7_robustness_v1"
+    feature1_threshold: float | None = None
+    feature2_threshold: float | None = None
+    prospective_start_date: date | None = None
 
 
 FROZEN_HYPOTHESES = {
     "m7_return20_vol20_minus5_post20": FrozenHypothesis(
-        "return_20d", "realized_vol_20d", "post_20d_return", -5)
+        "return_20d", "realized_vol_20d", "post_20d_return", -5,
+        feature1_threshold=0.0332778702,
+        feature2_threshold=0.8446461455,
+        prospective_start_date=date(2026, 8, 23))
 }
 
 
@@ -263,9 +275,11 @@ def analyze_interaction_robustness(rows, feature1, feature2, outcome, offset, fu
         [r[field] for r in runs if field == "n_high_high" or r["n_high_high"]])
         for field in group_fields}
     high_summary["empty_high_high_runs"] = sum(r["n_high_high"] == 0 for r in runs)
-    hypothesis = FrozenHypothesis(feature1, feature2, outcome, offset)
     hypothesis_id = next((name for name, spec in FROZEN_HYPOTHESES.items()
-                          if spec == hypothesis), None)
+                          if (spec.feature1, spec.feature2, spec.outcome, spec.observation_offset)
+                          == (feature1, feature2, outcome, offset)), None)
+    hypothesis = FROZEN_HYPOTHESES.get(
+        hypothesis_id, FrozenHypothesis(feature1, feature2, outcome, offset))
     return {
         "hypothesis_id": hypothesis_id,
         "hypothesis": asdict(hypothesis),
