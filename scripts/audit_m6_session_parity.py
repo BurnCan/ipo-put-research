@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 
 from app.db import SessionLocal
 from app.services.event_analysis.session_parity import (audit_m6_session_parity,
+                                                         mismatching_session_parity_rows,
                                                          summarize_session_parity)
 
 
@@ -41,7 +42,7 @@ def main():
     with SessionLocal() as db:
         rows = audit_m6_session_parity(db, **query)
         result = summarize_session_parity(db, rows)
-        selected = [r for r in rows if not args.mismatches_only or r.mismatch_type != "exact_match"]
+        selected = mismatching_session_parity_rows(rows) if args.mismatches_only else rows
         if args.details or args.mismatches_only:
             result["details"] = [r.to_dict() for r in selected]
         if args.output:

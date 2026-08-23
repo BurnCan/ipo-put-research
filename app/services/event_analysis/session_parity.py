@@ -78,8 +78,22 @@ def _classification(event_match, observation_match, missing, reproduced):
     if event_match and observation_match: return "exact_match"
     if not event_match and not observation_match: return "event_and_observation_mismatch"
     if not event_match: return "event_session_mismatch"
-    if missing and reproduced: return "observation_session_mismatch"
-    return "observation_session_mismatch"
+    if missing and reproduced:
+        return "observation_session_mismatch_sparse_history"
+    return "observation_session_mismatch_unexplained"
+
+
+def _feature_window(observation: date, return_count: int = 20) -> tuple[date, ...]:
+    """Canonical bars required by M6's N-return/N+1-bar feature semantics."""
+    result = [observation]
+    for _ in range(return_count):
+        result.append(session_offset(result[-1], -1))
+    return tuple(reversed(result))
+
+
+def mismatching_session_parity_rows(rows):
+    """Apply the CLI's mismatch selection without changing the audit population."""
+    return [row for row in rows if row.mismatch_type != "exact_match"]
 
 
 def _audit_one(db, snapshot, lockup, company):
@@ -162,26 +176,29 @@ def summarize_session_parity(db, rows):
     discovery = list(discovery_by_lockup.values())
     affected, recomputable = [], 0
     for row in discovery:
-        if row.observation_session_match: continue
+        if row.mismatch_type == "exact_match": continue
         affected.append({"ticker": row.ticker, "lockup_id": row.lockup_id})
         if row.canonical_observation_date is not None:
-            dates = list(db.scalars(select(DailyPrice.trade_date).where(
+            required_dates = _feature_window(row.canonical_observation_date)
+            stored_dates = set(db.scalars(select(DailyPrice.trade_date).where(
                 DailyPrice.security_id == row.security_id,
-                DailyPrice.trade_date <= row.canonical_observation_date
-            ).order_by(DailyPrice.trade_date)))
-            recomputable += int(bool(dates) and dates[-1] == row.canonical_observation_date and len(dates) >= 21)
+                DailyPrice.trade_date.in_(required_dates))))
+            recomputable += int(stored_dates == set(required_dates))
     mismatch_count = len(affected)
     return {
         "snapshots_seen": len(rows), "exact_matches": counts["exact_match"],
         "event_session_mismatches": counts["event_session_mismatch"],
-        "observation_session_mismatches": counts["observation_session_mismatch"],
+        "observation_session_mismatches": (
+            counts["observation_session_mismatch_sparse_history"] +
+            counts["observation_session_mismatch_unexplained"]),
+        "observation_session_mismatches_sparse_history":
+            counts["observation_session_mismatch_sparse_history"],
+        "observation_session_mismatches_unexplained":
+            counts["observation_session_mismatch_unexplained"],
         "event_and_observation_mismatches": counts["event_and_observation_mismatch"],
         "missing_required_fields": counts["missing_required_fields"],
-        "sparse_market_history_cases": sum(r.mismatch_type != "exact_match" and
-                                           bool(r.missing_expected_sessions) and
-                                           r.old_bar_offset_reproduced for r in rows),
-        "unexplained_mismatches": sum(r.mismatch_type != "exact_match" and
-                                      not r.old_bar_offset_reproduced for r in rows),
+        "sparse_market_history_cases": counts["observation_session_mismatch_sparse_history"],
+        "unexplained_mismatches": counts["observation_session_mismatch_unexplained"],
         "canonical_calendar_id": CALENDAR_ID,
         "canonical_calendar_provider": CALENDAR_PROVIDER,
         "canonical_calendar_version": version(CALENDAR_PROVIDER),
