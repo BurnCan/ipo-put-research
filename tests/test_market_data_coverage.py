@@ -181,3 +181,131 @@ def test_backfill_cli_honors_as_of_date(monkeypatch, capsys):
     cli.main()
     capsys.readouterr()
     assert captured == {'as_of_date': date(2025, 1, 8), 'dry_run': True}
+
+
+def test_coverage_tasks_skip_unknown_lockup_and_keep_valid_work():
+    from scripts.audit_market_data_coverage import coverage_tasks
+
+    args = SimpleNamespace(start_date=None, end_date=None)
+    security = SimpleNamespace(id=10, ticker='SPRS')
+    rows = [
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=2), security),
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=3), security),
+    ]
+
+    def planner(lockup):
+        if lockup.id == 3:
+            raise ValueError('lockup has no known event date')
+        return SimpleNamespace(coverage_start=date(2025, 1, 6),
+                               coverage_end=date(2025, 1, 10))
+
+    tasks, skipped = coverage_tasks(rows, args, planner)
+    assert [(task[1].id, task[3], task[4]) for task in tasks] == [
+        (2, date(2025, 1, 6), date(2025, 1, 10))]
+    assert skipped == [{'ipo_id': 1, 'lockup_id': 3, 'ticker': 'SPRS',
+                        'status': 'no_known_event_date'}]
+
+
+def test_explicit_coverage_tasks_need_no_event_date_and_deduplicate_security():
+    from scripts.audit_market_data_coverage import coverage_tasks
+
+    args = SimpleNamespace(start_date=date(2025, 2, 3), end_date=date(2025, 2, 7))
+    security = SimpleNamespace(id=10, ticker='SPRS')
+    rows = [
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=2), security),
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=3), security),
+    ]
+
+    def unexpected_planner(lockup):
+        raise AssertionError('explicit ranges must not plan lockup coverage')
+
+    tasks, skipped = coverage_tasks(rows, args, unexpected_planner)
+    assert len(tasks) == 1
+    assert tasks[0][3:] == (date(2025, 2, 3), date(2025, 2, 7))
+    assert skipped == []
+
+
+def test_audit_cli_reports_unknown_lockup_without_aborting(monkeypatch, capsys):
+    import scripts.audit_market_data_coverage as cli
+
+    class DbContext:
+        def __enter__(self): return object()
+        def __exit__(self, *args): return None
+
+    security = SimpleNamespace(id=10, ticker='SPRS')
+    rows = [
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=2), security),
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=3), security),
+    ]
+    monkeypatch.setattr(cli, 'SessionLocal', DbContext)
+    monkeypatch.setattr(cli, 'selected_rows', lambda db, args: rows)
+    monkeypatch.setattr(cli, 'plan_lockup_coverage', lambda lockup: None)
+
+    def planner(lockup):
+        if lockup.id == 3:
+            raise ValueError('lockup has no known event date')
+        return SimpleNamespace(coverage_start=date(2025, 1, 6),
+                               coverage_end=date(2025, 1, 6))
+
+    original_coverage_tasks = cli.coverage_tasks
+    monkeypatch.setattr(cli, 'coverage_tasks',
+                        lambda selected, args: original_coverage_tasks(selected, args, planner))
+    monkeypatch.setattr(cli, 'coverage', lambda *args, **kwargs: SimpleNamespace(
+        to_dict=lambda: {'coverage_complete': True, 'fetchable_missing_sessions': (),
+                         'future_missing_sessions': (), 'expected_session_count': 1,
+                         'stored_expected_session_count': 1, 'missing_sessions_total': 0}))
+    monkeypatch.setattr('sys.argv', ['audit_market_data_coverage.py', '--ticker', 'SPRS',
+                                    '--lockup-required-range', '--details'])
+    cli.main()
+    output = __import__('json').loads(capsys.readouterr().out)
+    assert output['lockups_selected'] == 2
+    assert output['lockups_plannable'] == 1
+    assert output['lockups_skipped_no_event_date'] == 1
+    assert output['securities_seen'] == 1
+    assert output['details'][-1]['status'] == 'no_known_event_date'
+
+
+def test_backfill_cli_dry_run_skips_unknown_lockup(monkeypatch, capsys):
+    import scripts.backfill_market_data_gaps as cli
+
+    class DbContext:
+        def __enter__(self): return object()
+        def __exit__(self, *args): return None
+
+    row = (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=2),
+           SimpleNamespace(id=10, ticker='SPRS'))
+    monkeypatch.setattr(cli, 'SessionLocal', DbContext)
+    monkeypatch.setattr(cli, 'create_provider', lambda: Provider())
+    monkeypatch.setattr(cli, 'selected_rows', lambda db, args: [row])
+    monkeypatch.setattr(cli, 'plan_lockup_coverage',
+                        lambda lockup: (_ for _ in ()).throw(
+                            ValueError('lockup has no known event date')))
+    monkeypatch.setattr(cli, 'backfill_missing_sessions',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError('skipped lockup must not be backfilled')))
+    monkeypatch.setattr('sys.argv', ['backfill_market_data_gaps.py', '--ticker', 'SPRS',
+                                    '--lockup-required-range', '--dry-run'])
+    cli.main()
+    output = __import__('json').loads(capsys.readouterr().out)
+    assert output['lockups_skipped_no_event_date'] == 1
+    assert output['details'] == [{'ipo_id': 1, 'lockup_id': 2,
+                                  'status': 'no_known_event_date', 'ticker': 'SPRS'}]
+
+
+def test_selected_rows_primary_lockup_only():
+    from scripts.audit_market_data_coverage import selected_rows
+
+    db, security, primary = fixture()
+    ancillary = IPOLockup(
+        ipo=primary.ipo, filing_id=2, holder_group='directors', lockup_type='ancillary',
+        confidence=Decimal('1'), parser_name='test', parser_version='1',
+        source_excerpt='x', source_locator='x', evidence_key='coverage-secondary')
+    db.add(ancillary); db.flush()
+    primary.ipo.primary_lockup_id = primary.id
+    db.commit()
+    base = dict(ticker='SPRS', ipo_id=None, lockup_id=None,
+                classification_status=None, candidate_type=None, offering_status=None)
+    all_rows = selected_rows(db, SimpleNamespace(**base, primary_lockup_only=False))
+    primary_rows = selected_rows(db, SimpleNamespace(**base, primary_lockup_only=True))
+    assert [row[2].id for row in all_rows] == [primary.id, ancillary.id]
+    assert [row[2].id for row in primary_rows] == [primary.id]
