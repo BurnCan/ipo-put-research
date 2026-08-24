@@ -346,11 +346,17 @@ def test_m8_upgrade_normalizes_legacy_strict_mode_and_is_idempotent():
     try:
         update_prospective_lockup_signals(db, hypothesis_id=HYPOTHESIS_ID)
         row = db.scalar(select(LockupProspectiveSignal))
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 1
+        assert row.evaluation_mode == "strict_prospective"
         db.execute(text(
             "UPDATE lockup_prospective_signals SET evaluation_mode = 'prospective'"))
         db.commit()
+        assert db.scalar(text(
+            "SELECT evaluation_mode FROM lockup_prospective_signals")) == "prospective"
 
         first = upgrade_milestone_8(db.bind)
+        assert db.scalar(text(
+            "SELECT evaluation_mode FROM lockup_prospective_signals")) == "strict_prospective"
         second = upgrade_milestone_8(db.bind)
         db.expire_all()
 
@@ -361,6 +367,29 @@ def test_m8_upgrade_normalizes_legacy_strict_mode_and_is_idempotent():
         default = next(column for column in inspect(db.bind).get_columns(
             "lockup_prospective_signals") if column["name"] == "evaluation_mode")["default"]
         assert "strict_prospective" in default
+    finally:
+        db.close()
+
+
+def test_m8_upgrade_preserves_colliding_legacy_and_strict_evidence():
+    db = _database_with_snapshot(CUTOFF + timedelta(days=1))
+    try:
+        update_prospective_lockup_signals(db, hypothesis_id=HYPOTHESIS_ID)
+        columns = [column.name for column in LockupProspectiveSignal.__table__.columns
+                   if column.name != "id"]
+        selected = ["'prospective'" if name == "evaluation_mode" else name
+                    for name in columns]
+        db.execute(text(
+            f"INSERT INTO lockup_prospective_signals ({', '.join(columns)}) "
+            f"SELECT {', '.join(selected)} FROM lockup_prospective_signals"))
+        db.commit()
+
+        assert upgrade_milestone_8(db.bind) == []
+        modes = db.scalars(select(LockupProspectiveSignal.evaluation_mode).order_by(
+            LockupProspectiveSignal.evaluation_mode)).all()
+
+        assert modes == ["prospective", "strict_prospective"]
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 2
     finally:
         db.close()
 
