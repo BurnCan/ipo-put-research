@@ -60,6 +60,7 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
         return [table]
     existing = {column["name"] for column in inspect(engine).get_columns(table)}
     definitions = {
+        "evaluation_mode": "VARCHAR(24) NOT NULL DEFAULT 'prospective'",
         "unavailable_reason": "VARCHAR(64) NULL",
         "required_observation_date": "DATE NULL",
         "calendar_id": "VARCHAR(16) NULL",
@@ -73,6 +74,19 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
                 connection.execute(text(
                     f"ALTER TABLE lockup_prospective_signals ADD COLUMN {name} {definition}"))
                 changed.append(f"lockup_prospective_signals.{name}")
+        constraint_names = {item.get("name") for item in
+                            inspect(engine).get_unique_constraints(table)}
+        if (engine.dialect.name == "postgresql" and
+                "uq_prospective_hypothesis_lockup_mode" not in constraint_names):
+            # Mode is part of evidence identity, allowing strict and shadow to
+            # coexist without changing either locked record.
+            connection.execute(text(
+                "ALTER TABLE lockup_prospective_signals DROP CONSTRAINT IF EXISTS "
+                "uq_prospective_hypothesis_lockup"))
+            connection.execute(text(
+                "ALTER TABLE lockup_prospective_signals ADD CONSTRAINT "
+                "uq_prospective_hypothesis_lockup_mode UNIQUE "
+                "(hypothesis_id, hypothesis_version, lockup_id, evaluation_mode)"))
     return changed
 
 

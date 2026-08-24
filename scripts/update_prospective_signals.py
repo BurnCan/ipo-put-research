@@ -9,6 +9,8 @@ from app.services.prospective import update_prospective_lockup_signals
 def main():
     p = argparse.ArgumentParser(description="Advance frozen M8 prospective observations from stored M6 rows.")
     p.add_argument("--hypothesis-id", required=True)
+    p.add_argument("--evaluation-mode", choices=("strict_prospective", "shadow_prospective"),
+                   default="strict_prospective")
     p.add_argument("--classification-status", default="classified")
     p.add_argument("--candidate-type", default="operating_company_ipo")
     p.add_argument("--offering-status", default="priced")

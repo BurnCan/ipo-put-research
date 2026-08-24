@@ -1,5 +1,5 @@
-"""M8 prospective tracking; consumes M6 records without recomputing them."""
-from dataclasses import asdict, dataclass
+"""Immutable M8 strict and secondary shadow prospective tracking."""
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 
 from sqlalchemy import select
@@ -8,14 +8,20 @@ from app.models import (Company, DailyPrice, IPO, IPOLockup, LockupEventAnalysis
                         LockupProspectiveSignal, LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import OUTCOME_VERSION, SNAPSHOT_VERSION
-from app.services.market_calendar import resolve_observation_session
+from app.services.event_analysis.lockup_snapshots import compute_snapshot
+from app.services.market_calendar import resolve_event_session, resolve_observation_session
+from app.services.market_data.coverage import feature_window_coverage
 
+STRICT = "strict_prospective"
+SHADOW = "shadow_prospective"
+LEGACY_STRICT = "prospective"
 OBSERVATION_BEFORE_PROSPECTIVE_START = "observation_before_prospective_start"
 
 
 @dataclass
 class ProspectiveReport:
     hypothesis_id: str
+    evaluation_mode: str
     ipos_seen: int = 0
     lockups_seen: int = 0
     eligible_events: int = 0
@@ -34,82 +40,57 @@ class ProspectiveReport:
     unavailable_observation_before_cutoff: int = 0
     calendar_snapshot_mismatches: int = 0
     errors: int = 0
+    shadow_eligible_events: int = 0
+    shadow_signals_created: int = 0
+    shadow_signals_existing: int = 0
+    shadow_already_current: int = 0
+    shadow_missing_t5_market_data: int = 0
+    shadow_incomplete_feature_window: int = 0
+    shadow_missed_lock_window: int = 0
+    shadow_awaiting_event: int = 0
+    shadow_awaiting_outcome: int = 0
+    shadow_matured: int = 0
+    shadow_outcomes_attached: int = 0
+    preview: list[dict] = field(default_factory=list)
 
     def to_dict(self): return asdict(self)
 
 
-def _event_date(lockup):
-    return lockup.stated_expiration_date or lockup.calculated_expiration_date
+def _event_date(lockup): return lockup.stated_expiration_date or lockup.calculated_expiration_date
 
 
-def _status(row, outcome):
-    if row.observation_date is None: return "pending_observation"
-    if outcome and outcome.post_20d_return is not None: return "matured"
-    if row.event_trade_date is None: return "awaiting_event"
-    return "awaiting_outcome"
-
-
-def _required_observation_date(db, lockup, ipo, snapshot, offset):
-    """Return stored M6 evidence (when present) and canonical session identity."""
-    resolution = resolve_observation_session(_event_date(lockup), offset)
-    security_id = snapshot.security_id if snapshot is not None else None
-    if security_id is None:
-        security = db.scalar(select(Security).where(
-            Security.company_id == ipo.company_id,
-            Security.is_primary.is_(True)).order_by(Security.id))
-        security_id = security.id if security else None
-    # M6 remains immutable and authoritative historical evidence.  The caller
-    # reports, rather than repairs, any disagreement with the canonical XNYS date.
-    required_date = snapshot.observation_date if snapshot is not None else resolution.observation_session
-    mismatch = bool(snapshot and snapshot.observation_date != resolution.observation_session)
-    return required_date, security_id, resolution, mismatch
-
-
-def _unavailable_row(spec, hypothesis_id, ipo, lockup, event_date,
-                     observation_date, security_id, resolution):
-    return LockupProspectiveSignal(
-        hypothesis_id=hypothesis_id, hypothesis_version=spec.analysis_version,
-        ipo_id=ipo.id, lockup_id=lockup.id, security_id=security_id,
-        observation_offset=spec.observation_offset, observation_date=observation_date,
-        required_observation_date=resolution.observation_session,
-        calendar_id=resolution.calendar_id, calendar_provider=resolution.calendar_provider,
-        calendar_version=resolution.calendar_version,
-        event_date=event_date, feature1_name=spec.feature1,
-        feature1_threshold=spec.feature1_threshold, feature2_name=spec.feature2,
-        feature2_threshold=spec.feature2_threshold, is_high_high=False,
-        signal_status="unavailable", unavailable_reason=OBSERVATION_BEFORE_PROSPECTIVE_START,
-        evaluation_mode="lifecycle_tracking")
-
-
-def _existing_lifecycle_row(db, hypothesis_id, hypothesis_version, lockup_id):
-    """Find the one M8 row allowed by the hypothesis/lockup identity.
-
-    Deliberately do not filter by evaluation_mode here: both genuine prospective
-    evidence and permanent lifecycle-tracking unavailability occupy the same
-    unique identity and must be authoritative on subsequent updater runs.
-    """
+def _existing(db, hypothesis_id, version, lockup_id, mode):
+    modes = (STRICT, LEGACY_STRICT) if mode == STRICT else (mode,)
     return db.scalar(select(LockupProspectiveSignal).where(
         LockupProspectiveSignal.hypothesis_id == hypothesis_id,
-        LockupProspectiveSignal.hypothesis_version == hypothesis_version,
-        LockupProspectiveSignal.lockup_id == lockup_id))
+        LockupProspectiveSignal.hypothesis_version == version,
+        LockupProspectiveSignal.lockup_id == lockup_id,
+        LockupProspectiveSignal.evaluation_mode.in_(modes)).order_by(LockupProspectiveSignal.id))
 
 
-def update_prospective_lockup_signals(db, *, hypothesis_id, classification_status="classified",
-                                      candidate_type="operating_company_ipo",
-                                      offering_status="priced", primary_lockup_only=True,
-                                      ticker=None, ipo_id=None, limit=None, dry_run=False,
-                                      as_of_date=None):
-    """Advance prospective records while never rewriting an existing signal decision."""
+def _outcome(db, lockup_id, security_id):
+    return db.scalar(select(LockupEventAnalysis).where(
+        LockupEventAnalysis.lockup_id == lockup_id,
+        LockupEventAnalysis.security_id == security_id,
+        LockupEventAnalysis.outcome_version == OUTCOME_VERSION))
+
+
+def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRICT,
+                                      classification_status="classified",
+                                      candidate_type="operating_company_ipo", offering_status="priced",
+                                      primary_lockup_only=True, ticker=None, ipo_id=None, limit=None,
+                                      dry_run=False, as_of_date=None):
+    """Advance one explicitly selected mode; locked classifications are never rewritten."""
+    if evaluation_mode == LEGACY_STRICT: evaluation_mode = STRICT
+    if evaluation_mode not in (STRICT, SHADOW): raise ValueError("unknown evaluation mode")
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
     spec = FROZEN_HYPOTHESES[hypothesis_id]
-    as_of_date = as_of_date or date.today()
+    today = as_of_date or date.today()
     if spec.feature1_threshold is None or spec.feature2_threshold is None or spec.prospective_start_date is None:
         raise ValueError("hypothesis is not frozen for prospective use")
-    report = ProspectiveReport(hypothesis_id)
-    stmt = (select(IPOLockup, IPO).join(IPO, IPO.id == IPOLockup.ipo_id)
-            .join(Company, Company.id == IPO.company_id))
-    if primary_lockup_only: stmt = stmt.where(IPOLockup.id == IPO.primary_lockup_id,
-        IPO.primary_lockup_id.is_not(None), IPO.primary_lockup_expiration_date.is_not(None))
+    report = ProspectiveReport(hypothesis_id, evaluation_mode)
+    stmt = select(IPOLockup, IPO, Company).join(IPO, IPO.id == IPOLockup.ipo_id).join(Company, Company.id == IPO.company_id)
+    if primary_lockup_only: stmt = stmt.where(IPOLockup.id == IPO.primary_lockup_id, IPO.primary_lockup_id.is_not(None))
     if classification_status is not None: stmt = stmt.where(IPO.classification_status == classification_status)
     if candidate_type is not None: stmt = stmt.where(IPO.candidate_type == candidate_type)
     if offering_status is not None: stmt = stmt.where(IPO.offering_status == offering_status)
@@ -118,91 +99,124 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, classification_statu
     stmt = stmt.order_by(IPO.id, IPOLockup.id)
     if limit is not None: stmt = stmt.limit(limit)
     events = db.execute(stmt).all()
-    report.ipos_seen = len({ipo.id for _, ipo in events}); report.lockups_seen = len(events)
-    for lockup, ipo in events:
+    report.ipos_seen = len({ipo.id for _, ipo, _ in events}); report.lockups_seen = len(events)
+    for lockup, ipo, company in events:
         event_date = _event_date(lockup)
-        if event_date is None: report.unavailable += 1; continue
-        report.eligible_events += 1
-        existing = _existing_lifecycle_row(
-            db, hypothesis_id, spec.analysis_version, lockup.id)
+        if not event_date: report.unavailable += 1; continue
+        resolution = resolve_observation_session(event_date, spec.observation_offset)
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
-        # Any previously frozen prospective evidence wins over later lifecycle
-        # reconstruction, including an older M6 snapshot.
-        if (existing is not None and
-                existing.evaluation_mode == "lifecycle_tracking" and
-                existing.signal_status == "unavailable"):
-            report.unavailable += 1
-            report.unavailable_observation_before_cutoff += int(
-                existing.unavailable_reason == OBSERVATION_BEFORE_PROSPECTIVE_START)
-            report.already_current += 1
+        # Strict retains its existing immutable M6 identity. Shadow deliberately
+        # uses only the canonical calendar session and never this legacy identity.
+        observation_date = (snapshot.observation_date if evaluation_mode == STRICT and snapshot
+                            else resolution.observation_session)
+        report.calendar_snapshot_mismatches += int(bool(
+            snapshot and snapshot.observation_date != resolution.observation_session))
+        event_session = resolve_event_session(event_date).event_session
+        timing_eligible = (observation_date > spec.prospective_start_date if evaluation_mode == STRICT else
+                           observation_date <= spec.prospective_start_date < event_session)
+        if not timing_eligible:
+            # Preserve the original strict lifecycle audit record. It is not a
+            # signal and shadow mode can coexist with it under the mode-aware key.
+            if (evaluation_mode == STRICT and observation_date <= spec.prospective_start_date
+                    and event_session > spec.prospective_start_date):
+                lifecycle = _existing(db, hypothesis_id, spec.analysis_version, lockup.id,
+                                      "lifecycle_tracking")
+                report.unavailable += 1; report.unavailable_observation_before_cutoff += 1
+                if lifecycle is None and not dry_run:
+                    security = db.scalar(select(Security).where(Security.company_id == ipo.company_id,
+                        Security.is_primary.is_(True)).order_by(Security.id))
+                    db.add(LockupProspectiveSignal(hypothesis_id=hypothesis_id,
+                        hypothesis_version=spec.analysis_version, evaluation_mode="lifecycle_tracking",
+                        ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id if security else None,
+                        observation_offset=spec.observation_offset, observation_date=observation_date,
+                        required_observation_date=observation_date, calendar_id=resolution.calendar_id,
+                        calendar_provider=resolution.calendar_provider, calendar_version=resolution.calendar_version,
+                        event_date=event_date, feature1_name=spec.feature1,
+                        feature1_threshold=spec.feature1_threshold, feature2_name=spec.feature2,
+                        feature2_threshold=spec.feature2_threshold, is_high_high=False,
+                        signal_status="unavailable", unavailable_reason=OBSERVATION_BEFORE_PROSPECTIVE_START))
+                elif lifecycle is not None: report.already_current += 1
             continue
-        required_date, required_security_id, resolution, mismatch = _required_observation_date(
-            db, lockup, ipo, snapshot, spec.observation_offset)
-        report.calendar_snapshot_mismatches += int(mismatch)
-        # Observations through the hypothesis freeze date belong to discovery,
-        # never prospective; only strictly later snapshots are out-of-sample.
-        if existing is None and required_date is not None and required_date <= spec.prospective_start_date:
-            report.unavailable += 1
-            if event_date > spec.prospective_start_date:
-                report.unavailable_observation_before_cutoff += 1
-                if not dry_run:
-                    db.add(_unavailable_row(spec, hypothesis_id, ipo, lockup, event_date,
-                                            required_date, required_security_id, resolution))
-                    db.flush()
+        report.eligible_events += 1
+        if evaluation_mode == SHADOW: report.shadow_eligible_events += 1
+        existing = _existing(db, hypothesis_id, spec.analysis_version, lockup.id, evaluation_mode)
+        if existing is None and evaluation_mode == SHADOW and today >= event_session:
+            report.shadow_missed_lock_window += 1; continue
+        security = db.scalar(select(Security).where(Security.company_id == ipo.company_id,
+            Security.is_primary.is_(True)).order_by(Security.id))
+        if existing is None and security is None:
+            if evaluation_mode == SHADOW: report.shadow_missing_t5_market_data += 1
+            else: report.waiting_for_market_data += 1
             continue
-        if existing is None and (snapshot is None or getattr(snapshot, spec.feature1) is None or
-                                 getattr(snapshot, spec.feature2) is None):
-            if required_date > as_of_date:
-                report.pending_observation += 1
-            else:
-                report.waiting_for_market_data += 1
+        values = None
+        if existing is None and evaluation_mode == STRICT:
+            if observation_date > today: report.pending_observation += 1; continue
+            if snapshot is None or snapshot.observation_date != observation_date:
+                report.waiting_for_market_data += 1; continue
+            values = (getattr(snapshot, spec.feature1), getattr(snapshot, spec.feature2))
+        elif existing is None:
+            t5 = db.scalar(select(DailyPrice).where(DailyPrice.security_id == security.id,
+                                                    DailyPrice.trade_date == observation_date))
+            if t5 is None: report.shadow_missing_t5_market_data += 1; continue
+            window = feature_window_coverage(db, security, observation_date)
+            if not window.complete: report.shadow_incomplete_feature_window += 1; continue
+            bars = list(db.scalars(select(DailyPrice).where(
+                DailyPrice.security_id == security.id,
+                DailyPrice.trade_date.in_(window.required_sessions)).order_by(DailyPrice.trade_date)))
+            computed = compute_snapshot(bars, ipo, lockup, observation_offset=spec.observation_offset,
+                event_date=event_date, event_date_source="canonical", event_trade_date=event_session)
+            values = (computed[spec.feature1], computed[spec.feature2])
+        if existing is None and (values[0] is None or values[1] is None):
+            if evaluation_mode == SHADOW: report.shadow_incomplete_feature_window += 1
+            else: report.waiting_for_market_data += 1
             continue
         if existing is None:
+            v1, v2 = map(float, values); s1 = "low" if v1 <= spec.feature1_threshold else "high"; s2 = "low" if v2 <= spec.feature2_threshold else "high"
+            report.preview.append({"ticker": company.ticker, "lockup_id": lockup.id,
+                "canonical_t5": observation_date, "event_session": event_session,
+                spec.feature1: v1, spec.feature2: v2, "interaction_group": f"{s1}_{s2}",
+                "eligibility_reason": evaluation_mode})
             report.signals_would_create += int(dry_run)
             if dry_run: continue
-            v1, v2 = float(getattr(snapshot, spec.feature1)), float(getattr(snapshot, spec.feature2))
-            s1 = "low" if v1 <= spec.feature1_threshold else "high"
-            s2 = "low" if v2 <= spec.feature2_threshold else "high"
-            existing = LockupProspectiveSignal(
-                hypothesis_id=hypothesis_id, hypothesis_version=spec.analysis_version,
-                ipo_id=ipo.id, lockup_id=lockup.id, security_id=snapshot.security_id,
-                observation_offset=spec.observation_offset, observation_date=snapshot.observation_date,
-                required_observation_date=resolution.observation_session,
-                calendar_id=resolution.calendar_id, calendar_provider=resolution.calendar_provider,
-                calendar_version=resolution.calendar_version,
-                event_date=event_date, event_trade_date=snapshot.event_trade_date,
-                feature1_name=spec.feature1, feature1_value=v1, feature1_threshold=spec.feature1_threshold,
-                feature2_name=spec.feature2, feature2_value=v2, feature2_threshold=spec.feature2_threshold,
-                feature1_side=s1, feature2_side=s2, interaction_group=f"{s1}_{s2}",
-                is_high_high=s1 == s2 == "high", signal_status="signal_created")
+            existing = LockupProspectiveSignal(hypothesis_id=hypothesis_id,
+                hypothesis_version=spec.analysis_version, evaluation_mode=evaluation_mode,
+                ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id,
+                observation_offset=spec.observation_offset, observation_date=observation_date,
+                required_observation_date=observation_date, calendar_id=resolution.calendar_id,
+                calendar_provider=resolution.calendar_provider, calendar_version=resolution.calendar_version,
+                event_date=event_date, event_trade_date=event_session, feature1_name=spec.feature1,
+                feature1_value=v1, feature1_threshold=spec.feature1_threshold, feature2_name=spec.feature2,
+                feature2_value=v2, feature2_threshold=spec.feature2_threshold, feature1_side=s1,
+                feature2_side=s2, interaction_group=f"{s1}_{s2}", is_high_high=s1 == s2 == "high",
+                signal_status="signal_created")
             db.add(existing); db.flush(); report.signals_created += 1
-        else: report.signals_existing += 1
-        outcome = db.scalar(select(LockupEventAnalysis).where(
-            LockupEventAnalysis.lockup_id == lockup.id,
-            LockupEventAnalysis.security_id == existing.security_id,
-            LockupEventAnalysis.outcome_version == OUTCOME_VERSION))
+            if evaluation_mode == SHADOW: report.shadow_signals_created += 1
+        else:
+            report.signals_existing += 1
+            if evaluation_mode == SHADOW: report.shadow_signals_existing += 1
+        outcome = _outcome(db, lockup.id, existing.security_id)
         if existing.realized_outcome_value is not None:
-            report.matured += 1; report.already_current += 1; continue
-        status = _status(existing, outcome)
+            report.matured += 1; report.already_current += 1
+            if evaluation_mode == SHADOW: report.shadow_matured += 1; report.shadow_already_current += 1
+            continue
+        if today < event_session: status = "awaiting_event"
+        elif outcome is None or getattr(outcome, spec.outcome) is None: status = "awaiting_outcome"
+        else: status = "matured"
         if status == "matured":
             report.outcomes_would_attach += int(dry_run)
             if not dry_run:
-                existing.realized_outcome_name = spec.outcome
-                existing.realized_outcome_value = getattr(outcome, spec.outcome)
-                existing.bearish_mfe_20d = outcome.bearish_mfe_20d
-                existing.bearish_mae_20d = outcome.bearish_mae_20d
-                bars = list(db.scalars(select(DailyPrice).where(
-                    DailyPrice.security_id == existing.security_id,
-                    DailyPrice.trade_date >= outcome.event_trade_date).order_by(DailyPrice.trade_date).limit(21)))
-                existing.outcome_observation_date = bars[20].trade_date if len(bars) > 20 else outcome.as_of_date
-                existing.outcome_attached_at = datetime.now(UTC)
+                existing.realized_outcome_name = spec.outcome; existing.realized_outcome_value = getattr(outcome, spec.outcome)
+                existing.bearish_mfe_20d = outcome.bearish_mfe_20d; existing.bearish_mae_20d = outcome.bearish_mae_20d
+                existing.outcome_observation_date = outcome.as_of_date; existing.outcome_attached_at = datetime.now(UTC)
                 existing.signal_status = "matured"; report.outcomes_attached += 1; report.matured += 1
+                if evaluation_mode == SHADOW: report.shadow_outcomes_attached += 1; report.shadow_matured += 1
         else:
             if not dry_run: existing.signal_status = status
             setattr(report, status, getattr(report, status) + 1)
+            if evaluation_mode == SHADOW: setattr(report, "shadow_" + status, getattr(report, "shadow_" + status) + 1)
     if dry_run: db.rollback()
     else: db.commit()
     return report
