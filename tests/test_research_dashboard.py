@@ -84,6 +84,27 @@ def _dashboard_database():
     return db, historical_id, pending_id, signaled_id
 
 
+def _add_signal_mode(db, lockup_id, mode, *, feature1=.2209, feature2=.5146,
+                     group="high_low", status="awaiting_event"):
+    """Add a coexisting stored signal using the lockup fixture identities."""
+    source = db.scalar(select(LockupProspectiveSignal).where(
+        LockupProspectiveSignal.lockup_id == lockup_id))
+    db.add(LockupProspectiveSignal(
+        hypothesis_id=source.hypothesis_id, hypothesis_version=source.hypothesis_version,
+        ipo_id=source.ipo_id, lockup_id=source.lockup_id, security_id=source.security_id,
+        observation_offset=source.observation_offset, observation_date=source.observation_date,
+        required_observation_date=source.observation_date, calendar_id="XNYS",
+        calendar_provider="exchange_calendars", calendar_version="test",
+        event_date=source.event_date, event_trade_date=source.event_trade_date,
+        feature1_name=source.feature1_name, feature1_value=feature1,
+        feature1_threshold=source.feature1_threshold, feature1_side="high",
+        feature2_name=source.feature2_name, feature2_value=feature2,
+        feature2_threshold=source.feature2_threshold, feature2_side="low",
+        interaction_group=group, is_high_high=False, signal_status=status,
+        evaluation_mode=mode))
+    db.flush()
+
+
 def test_hypothesis_metadata_is_registry_projection():
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     payload = hypothesis_metadata()
@@ -205,6 +226,85 @@ def test_lifecycle_unavailable_uses_stored_required_t5_date():
         assert row["required_t5_date"] == CUTOFF - timedelta(days=3)
         assert row["signal_observation_date"] == CUTOFF
         assert row["stored_t5_snapshot_date"] == CUTOFF
+    finally:
+        db.close()
+
+
+def test_shadow_signal_wins_over_lifecycle_and_supplies_frozen_features_without_snapshot():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        lockup_id = _add_lockup(db, 8, CUTOFF, "unavailable",
+                                "observation_before_prospective_start")
+        snapshot = db.scalar(select(LockupSignalSnapshot).where(
+            LockupSignalSnapshot.lockup_id == lockup_id))
+        db.delete(snapshot)
+        _add_signal_mode(db, lockup_id, "shadow_prospective")
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == lockup_id)
+        assert row["m8_status"] == "awaiting_event"
+        assert row["evaluation_mode"] == "shadow_prospective"
+        assert row["prospective_track"] == "shadow"
+        assert row["t5_timing_status"] == "shadow_signal_frozen"
+        assert row["return_20d_at_minus5"] == .2209
+        assert row["realized_vol_20d_at_minus5"] == .5146
+        assert row["interaction_group"] == "high_low"
+        assert row["is_high_high"] is False
+        assert row["t5_snapshot_available"] is False
+        assert row["signal_locked_at"] is not None
+    finally:
+        db.close()
+
+
+def test_strict_signal_wins_when_all_signal_modes_coexist():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        lockup_id = _add_lockup(db, 9, CUTOFF, "unavailable",
+                                "observation_before_prospective_start")
+        _add_signal_mode(db, lockup_id, "shadow_prospective", feature1=.22)
+        _add_signal_mode(db, lockup_id, "strict_prospective", feature1=.33,
+                         group="high_high", status="awaiting_outcome")
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db)
+                   if row["lockup_id"] == lockup_id)
+        assert row["evaluation_mode"] == "strict_prospective"
+        assert row["prospective_track"] == "strict"
+        assert row["m8_status"] == "awaiting_outcome"
+        assert row["return_20d_at_minus5"] == .33
+        assert row["interaction_group"] == "high_high"
+    finally:
+        db.close()
+
+
+def test_summary_keeps_strict_and_shadow_counts_separate_with_legacy_as_strict():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        _add_signal_mode(db, signaled_id, "shadow_prospective")
+        shadow_only_id = _add_lockup(db, 10, CUTOFF, "unavailable",
+                                     "observation_before_prospective_start")
+        _add_signal_mode(db, shadow_only_id, "shadow_prospective")
+        db.commit()
+
+        summary = get_research_summary(db)
+        assert summary["prospective_signals"] == 1  # legacy ``prospective`` only
+        assert summary["shadow_signals"] == 2
+        assert summary["awaiting_event"] == 1
+    finally:
+        db.close()
+
+
+def test_no_stored_signal_is_not_projected_as_shadow():
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    try:
+        lockup_id = _add_lockup(db, 11)
+        db.commit()
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
+                   if row["lockup_id"] == lockup_id)
+        assert row["evaluation_mode"] is None
+        assert row["prospective_track"] is None
+        assert row["t5_timing_status"] != "shadow_signal_frozen"
     finally:
         db.close()
 
