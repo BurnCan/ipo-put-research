@@ -75,6 +75,17 @@ def _outcome(db, lockup_id, security_id):
         LockupEventAnalysis.outcome_version == OUTCOME_VERSION))
 
 
+def _outcome_observation_date(db, outcome, security_id):
+    """Return the frozen +20 session, not the analysis row's later data cutoff."""
+    if outcome.event_trade_date is None:
+        return outcome.as_of_date
+    sessions = list(db.scalars(select(DailyPrice.trade_date).where(
+        DailyPrice.security_id == security_id,
+        DailyPrice.trade_date >= outcome.event_trade_date,
+    ).order_by(DailyPrice.trade_date).limit(21)))
+    return sessions[20] if len(sessions) == 21 else outcome.as_of_date
+
+
 def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRICT,
                                       classification_status="classified",
                                       candidate_type="operating_company_ipo", offering_status="priced",
@@ -174,6 +185,12 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             else: report.waiting_for_market_data += 1
             continue
         if existing is None:
+            signal_locked_at = datetime.now(UTC)
+            # Shadow admission is date-level: durable lock provenance must be
+            # strictly earlier than the canonical event session.
+            if evaluation_mode == SHADOW and signal_locked_at.date() >= event_session:
+                report.shadow_missed_lock_window += 1
+                continue
             v1, v2 = map(float, values); s1 = "low" if v1 <= spec.feature1_threshold else "high"; s2 = "low" if v2 <= spec.feature2_threshold else "high"
             report.preview.append({"ticker": company.ticker, "lockup_id": lockup.id,
                 "canonical_t5": observation_date, "event_session": event_session,
@@ -191,7 +208,7 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
                 feature1_value=v1, feature1_threshold=spec.feature1_threshold, feature2_name=spec.feature2,
                 feature2_value=v2, feature2_threshold=spec.feature2_threshold, feature1_side=s1,
                 feature2_side=s2, interaction_group=f"{s1}_{s2}", is_high_high=s1 == s2 == "high",
-                signal_status="signal_created")
+                signal_status="signal_created", created_at=signal_locked_at)
             db.add(existing); db.flush(); report.signals_created += 1
             if evaluation_mode == SHADOW: report.shadow_signals_created += 1
         else:
@@ -210,7 +227,9 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             if not dry_run:
                 existing.realized_outcome_name = spec.outcome; existing.realized_outcome_value = getattr(outcome, spec.outcome)
                 existing.bearish_mfe_20d = outcome.bearish_mfe_20d; existing.bearish_mae_20d = outcome.bearish_mae_20d
-                existing.outcome_observation_date = outcome.as_of_date; existing.outcome_attached_at = datetime.now(UTC)
+                existing.outcome_observation_date = _outcome_observation_date(
+                    db, outcome, existing.security_id)
+                existing.outcome_attached_at = datetime.now(UTC)
                 existing.signal_status = "matured"; report.outcomes_attached += 1; report.matured += 1
                 if evaluation_mode == SHADOW: report.shadow_outcomes_attached += 1; report.shadow_matured += 1
         else:

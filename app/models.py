@@ -365,13 +365,16 @@ class LockupProspectiveSignal(Base):
     is_high_high: Mapped[bool] = mapped_column(Boolean, default=False)
     signal_status: Mapped[str] = mapped_column(String(32), index=True)
     unavailable_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    evaluation_mode: Mapped[str] = mapped_column(String(24), default="strict_prospective", index=True)
+    evaluation_mode: Mapped[str] = mapped_column(
+        String(24), default="strict_prospective", server_default="strict_prospective", index=True)
     realized_outcome_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
     realized_outcome_value: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
     outcome_observation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     outcome_attached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     bearish_mfe_20d: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
     bearish_mae_20d: Mapped[float | None] = mapped_column(Numeric(20, 10), nullable=True)
+    # Immutable signal-lock provenance.  Unlike ``updated_at``, this value is
+    # assigned once at admission and is never changed by lifecycle reruns.
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

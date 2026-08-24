@@ -61,6 +61,10 @@ the exact T-5 DailyPrice and a complete canonical 21-session feature window;
 absence of an old M6 snapshot is therefore distinct from market-data absence.
 It never rewrites M6 snapshots, never admits historical outcomes retroactively,
 and attaches outcomes only after maturity using the frozen M8 definition.
+`lockup_prospective_signals.created_at` is the immutable signal-lock timestamp
+(also exposed as `signal_locked_at` by the dashboard API). Under the current
+date-level admission guard, a shadow lock's UTC date must be strictly before
+the canonical event session; reruns never replace this timestamp.
 Each future hypothesis version uses its own freeze metadata.
 
 ```bash
