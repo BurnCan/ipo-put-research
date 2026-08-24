@@ -321,6 +321,9 @@ def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels
     assert "No prospective outcomes have matured yet." in page
     assert "Not eligible prospectively" in page
     assert "T-5 observation predates hypothesis freeze" in page
+    assert "<span>Bearish hits</span><strong>${esc(x.target_bearish_hits)}" in page
+    assert "<span>Bearish outcomes</span><strong>${esc(x.bearish_outcomes)}" in page
+    assert "groups.reduce((n,g)=>n+x.groups[g].bearish_hit_count" not in page
     for label in ("Pre-event 20d return", "Pre-event 20d realized vol",
                   "Outcome status", "Post-event 20d return", "Result"):
         assert label in page
