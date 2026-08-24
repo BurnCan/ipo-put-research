@@ -39,6 +39,8 @@ def add_filters(parser):
     parser.add_argument('--classification-status'); parser.add_argument('--candidate-type'); parser.add_argument('--offering-status')
     parser.add_argument('--primary-lockup-only', action='store_true')
     parser.add_argument('--start-date', type=date.fromisoformat); parser.add_argument('--end-date', type=date.fromisoformat)
+    parser.add_argument('--as-of-date', type=date.fromisoformat,
+                        help='classify missing sessions relative to YYYY-MM-DD')
     parser.add_argument('--lockup-required-range', action='store_true'); parser.add_argument('--details', action='store_true')
 
 
@@ -51,13 +53,18 @@ def main():
         for ipo, company, lockup, security in selected_rows(db, args):
             plan = plan_lockup_coverage(lockup)
             start, end = (args.start_date, args.end_date) if args.start_date else (plan.coverage_start, plan.coverage_end)
-            item = coverage(db, security, start, end).to_dict(); item.update(ipo_id=ipo.id, lockup_id=lockup.id)
+            item = coverage(db, security, start, end, as_of_date=args.as_of_date).to_dict()
+            item.update(ipo_id=ipo.id, lockup_id=lockup.id)
             details.append(item)
     summary = {'securities_seen': len(details), 'securities_complete': sum(x['coverage_complete'] for x in details),
-               'securities_with_gaps': sum(not x['coverage_complete'] for x in details),
+               'securities_with_gaps': sum(bool(x['fetchable_missing_sessions']) for x in details),
+               'securities_future_sessions_only': sum(
+                   bool(x['future_missing_sessions']) and not x['fetchable_missing_sessions'] for x in details),
                'expected_sessions': sum(x['expected_session_count'] for x in details),
                'stored_expected_sessions': sum(x['stored_expected_session_count'] for x in details),
-               'missing_sessions': sum(x['missing_session_count'] for x in details)}
+               'missing_sessions_total': sum(x['missing_sessions_total'] for x in details),
+               'fetchable_missing_sessions': sum(len(x['fetchable_missing_sessions']) for x in details),
+               'future_missing_sessions': sum(len(x['future_missing_sessions']) for x in details)}
     if args.details or len(details) <= 10: summary['details'] = details
     print(json.dumps(summary, indent=2, sort_keys=True, default=json_default))
 

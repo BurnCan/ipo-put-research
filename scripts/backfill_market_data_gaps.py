@@ -25,13 +25,19 @@ def main():
         for ipo, company, lockup, security in selected_rows(db, args):
             plan = plan_lockup_coverage(lockup)
             start, end = (args.start_date, args.end_date) if args.start_date else (plan.coverage_start, plan.coverage_end)
-            result = backfill_missing_sessions(db, provider, security, start, end, dry_run=args.dry_run)
+            result = backfill_missing_sessions(db, provider, security, start, end,
+                                               as_of_date=args.as_of_date, dry_run=args.dry_run)
             details.append(result.to_dict())
     summary = {'securities_seen': len(details), 'securities_complete': sum(not x['coverage_before']['missing_sessions'] for x in details),
-               'securities_with_gaps': sum(bool(x['coverage_before']['missing_sessions']) for x in details),
+               'securities_with_gaps': sum(bool(x['coverage_before']['fetchable_missing_sessions']) for x in details),
+               'securities_future_sessions_only': sum(
+                   bool(x['coverage_before']['future_missing_sessions'])
+                   and not x['coverage_before']['fetchable_missing_sessions'] for x in details),
                'expected_sessions': sum(len(x['coverage_before']['expected_sessions']) for x in details),
                'stored_expected_sessions': sum(x['coverage_before']['stored_expected_session_count'] for x in details),
-               'missing_sessions_before': sum(len(x['coverage_before']['missing_sessions']) for x in details),
+               'missing_sessions_total': sum(x['coverage_before']['missing_sessions_total'] for x in details),
+               'fetchable_missing_sessions': sum(len(x['coverage_before']['fetchable_missing_sessions']) for x in details),
+               'future_missing_sessions': sum(len(x['coverage_before']['future_missing_sessions']) for x in details),
                'provider_requests': sum(x['provider_requests'] for x in details), 'bars_fetched': sum(x['bars_fetched'] for x in details),
                'bars_created': sum(x['bars_created'] for x in details), 'bars_updated': sum(x['bars_updated'] for x in details),
                'provider_no_data': sum(x['provider_no_data'] for x in details), 'provider_errors': sum(x['provider_errors'] for x in details),
