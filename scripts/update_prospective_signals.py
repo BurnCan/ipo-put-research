@@ -1,10 +1,18 @@
 import argparse, json, sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from app.db import SessionLocal
 from app.services.prospective import update_prospective_lockup_signals
+
+
+def json_default(value):
+    """Encode date-like report values at the CLI's JSON boundary."""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
 
 def main():
     p = argparse.ArgumentParser(description="Advance frozen M8 prospective observations from stored M6 rows.")
@@ -20,5 +28,5 @@ def main():
     p.add_argument("--as-of-date", type=date.fromisoformat,
                    help="Inject lifecycle date (YYYY-MM-DD); defaults to today")
     with SessionLocal() as db: report = update_prospective_lockup_signals(db, **vars(p.parse_args()))
-    print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=json_default))
 if __name__ == "__main__": main()

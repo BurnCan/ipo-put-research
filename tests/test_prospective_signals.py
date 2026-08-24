@@ -1,5 +1,6 @@
 """Offline regression tests for the M8 prospective cutoff boundary."""
-from datetime import date, timedelta
+import json
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -19,10 +20,37 @@ from app.services.prospective.evaluation import evaluate_prospective_signals
 from app.services.schema_upgrade import upgrade_milestone_8
 from app.services.event_analysis.lockup_snapshots import compute_snapshot
 from app.services.market_calendar import resolve_event_session, resolve_observation_session, session_offset
+from scripts.update_prospective_signals import json_default
 
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 CUTOFF = date(2026, 8, 23)
+
+
+@pytest.mark.parametrize("evaluation_mode", ["shadow_prospective", "strict_prospective"])
+def test_dry_run_report_preview_dates_serialize_at_cli_boundary(evaluation_mode):
+    payload = {
+        "dry_run": True,
+        "evaluation_mode": evaluation_mode,
+        "preview": [{
+            "canonical_t5": date(2026, 8, 18),
+            "event_session": date(2026, 8, 25),
+            "generated_at": datetime(2026, 8, 24, 12, 30, 45),
+        }],
+    }
+    report = SimpleNamespace(to_dict=lambda: payload)
+
+    serialized = json.dumps(report.to_dict(), default=json_default)
+    decoded = json.loads(serialized)
+
+    assert decoded["preview"][0]["canonical_t5"] == "2026-08-18"
+    assert decoded["preview"][0]["event_session"] == "2026-08-25"
+    assert decoded["preview"][0]["generated_at"] == "2026-08-24T12:30:45"
+
+
+def test_json_default_rejects_unsupported_values():
+    with pytest.raises(TypeError, match="Object of type object is not JSON serializable"):
+        json_default(object())
 
 
 def _database_with_snapshot(observation_date):
