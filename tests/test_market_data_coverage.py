@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -96,3 +97,87 @@ def test_provider_error_preserves_canonical_gap():
                                        date(2025, 1, 6), date(2025, 1, 6))
     assert result.status == 'provider_error'
     assert result.coverage_after.missing_sessions == (date(2025, 1, 6),)
+
+
+def test_canonical_coverage_accepts_another_provider_and_preserves_provenance_view():
+    db, security, _ = fixture()
+    day = date(2025, 1, 6)
+    add_price(db, security, day, provider='old-provider')
+
+    assert coverage(db, security, day, day).coverage_complete
+    provider_view = coverage(db, security, day, day, provider='new-provider')
+    assert provider_view.missing_sessions == (day,)
+
+    new_provider = Provider([bar(day)])
+    result = backfill_missing_sessions(db, new_provider, security, day, day,
+                                       as_of_date=day)
+    assert result.status == 'complete'
+    assert result.provider_requests == 0
+    assert db.query(DailyPrice).count() == 1
+
+
+def test_future_only_and_mixed_missing_sessions_are_classified_and_not_fetched():
+    db, security, _ = fixture()
+    start, end, cutoff = date(2025, 1, 6), date(2025, 1, 10), date(2025, 1, 8)
+    wanted = sessions_in_range(start, end)
+    provider = Provider([bar(day) for day in wanted])
+
+    mixed = backfill_missing_sessions(db, provider, security, start, end,
+                                      as_of_date=cutoff, dry_run=True)
+    assert mixed.coverage_before.missing_sessions_total == 4
+    assert mixed.coverage_before.fetchable_missing_sessions == wanted[:3]
+    assert mixed.coverage_before.future_missing_sessions == wanted[3:]
+    assert mixed.request_ranges == ((start, cutoff),)
+    assert not provider.calls
+
+    executed = backfill_missing_sessions(db, provider, security, start, end,
+                                         as_of_date=cutoff)
+    assert provider.calls == [('SPRS', start, cutoff)]
+    assert executed.bars_created == 3
+    assert executed.status == 'future_sessions_only'
+
+    provider.calls.clear()
+    future_only = backfill_missing_sessions(db, provider, security, date(2025, 1, 10), end,
+                                            as_of_date=cutoff)
+    assert future_only.status == 'future_sessions_only'
+    assert future_only.request_ranges == ()
+    assert provider.calls == []
+
+
+def test_backfill_cli_honors_as_of_date(monkeypatch, capsys):
+    import scripts.backfill_market_data_gaps as cli
+
+    captured = {}
+    class DbContext:
+        def __enter__(self): return object()
+        def __exit__(self, *args): return None
+    db_context = DbContext()
+    monkeypatch.setattr(cli, 'SessionLocal', lambda: db_context)
+    monkeypatch.setattr(cli, 'create_provider', lambda: Provider())
+    monkeypatch.setattr(cli, 'selected_rows', lambda db, args: [
+        (SimpleNamespace(id=1), SimpleNamespace(), SimpleNamespace(id=2),
+         SimpleNamespace(id=3))])
+    monkeypatch.setattr(cli, 'plan_lockup_coverage', lambda lockup: SimpleNamespace(
+        coverage_start=date(2025, 1, 6), coverage_end=date(2025, 1, 10)))
+
+    before = SimpleNamespace(to_dict=lambda: {
+        'missing_sessions': (), 'missing_sessions_total': 0,
+        'fetchable_missing_sessions': (), 'future_missing_sessions': (),
+        'expected_sessions': (), 'stored_expected_session_count': 0})
+    fake_result = SimpleNamespace(to_dict=lambda: {
+        'status': 'complete', 'coverage_before': before.to_dict(),
+        'coverage_after': before.to_dict(), 'request_ranges': (),
+        'provider_requests': 0, 'bars_fetched': 0, 'bars_created': 0,
+        'bars_updated': 0, 'provider_no_data': 0, 'provider_errors': 0})
+
+    def fake_backfill(db, provider, security, start, end, **kwargs):
+        captured.update(kwargs)
+        return fake_result
+
+    monkeypatch.setattr(cli, 'backfill_missing_sessions', fake_backfill)
+    monkeypatch.setattr('sys.argv', ['backfill_market_data_gaps.py', '--ticker', 'SPRS',
+                                    '--lockup-required-range', '--as-of-date', '2025-01-08',
+                                    '--dry-run'])
+    cli.main()
+    capsys.readouterr()
+    assert captured == {'as_of_date': date(2025, 1, 8), 'dry_run': True}

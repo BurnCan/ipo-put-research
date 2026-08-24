@@ -28,6 +28,9 @@ class CoverageResult:
     expected_sessions: tuple[date, ...]
     stored_sessions: tuple[date, ...]
     missing_sessions: tuple[date, ...]
+    as_of_date: date
+    fetchable_missing_sessions: tuple[date, ...]
+    future_missing_sessions: tuple[date, ...]
     non_session_stored_dates: tuple[date, ...]
     calendar_id: str = CALENDAR_ID
     calendar_provider: str = CALENDAR_PROVIDER
@@ -40,6 +43,8 @@ class CoverageResult:
     @property
     def missing_session_count(self): return len(self.missing_sessions)
     @property
+    def missing_sessions_total(self): return len(self.missing_sessions)
+    @property
     def coverage_complete(self): return not self.missing_sessions
     @property
     def coverage_ratio(self):
@@ -50,6 +55,7 @@ class CoverageResult:
         value.update(expected_session_count=self.expected_session_count,
                      stored_expected_session_count=self.stored_expected_session_count,
                      missing_session_count=self.missing_session_count,
+                     missing_sessions_total=self.missing_sessions_total,
                      coverage_complete=self.coverage_complete, coverage_ratio=self.coverage_ratio)
         return value
 
@@ -97,7 +103,7 @@ class BackfillResult:
 
 
 def coverage(db: Session, security: Security, start_date: date, end_date: date,
-             *, provider: str | None = None) -> CoverageResult:
+             *, provider: str | None = None, as_of_date: date | None = None) -> CoverageResult:
     expected = sessions_in_range(start_date, end_date)
     stmt = select(DailyPrice.trade_date).where(
         DailyPrice.security_id == security.id, DailyPrice.trade_date >= start_date,
@@ -108,10 +114,14 @@ def coverage(db: Session, security: Security, start_date: date, end_date: date,
     wanted = set(expected)
     company_name = security.company.name if security.company else db.scalar(
         select(Company.name).where(Company.id == security.company_id))
+    missing = tuple(day for day in expected if day not in set(stored))
+    cutoff = as_of_date or date.today()
     return CoverageResult(
         security.id, security.ticker, company_name, start_date, end_date,
         expected[0] if expected else None, expected[-1] if expected else None,
-        expected, stored, tuple(day for day in expected if day not in set(stored)),
+        expected, stored, missing, cutoff,
+        tuple(day for day in missing if day <= cutoff),
+        tuple(day for day in missing if day > cutoff),
         tuple(day for day in stored if day not in wanted and not is_session(day)),
     )
 
@@ -152,16 +162,20 @@ def provider_request_ranges(missing: tuple[date, ...]) -> tuple[tuple[date, date
 def backfill_missing_sessions(db: Session, provider: MarketDataProvider, security: Security,
                               start_date: date, end_date: date, *, as_of_date: date | None = None,
                               dry_run: bool = False) -> BackfillResult:
-    before = coverage(db, security, start_date, end_date, provider=provider.name)
     cutoff = as_of_date or date.today()
-    fetchable = tuple(day for day in before.missing_sessions if day <= cutoff)
+    # Canonical completeness is provider-independent. Provider identity is
+    # provenance only and must not trigger duplicate work after a switch.
+    before = coverage(db, security, start_date, end_date, as_of_date=cutoff)
+    fetchable = before.fetchable_missing_sessions
     ranges = provider_request_ranges(fetchable)
+    if not ranges:
+        status = "complete" if before.coverage_complete else "future_sessions_only"
+        return BackfillResult(status, before, before, ranges)
     symbol = security.provider_symbol or security.ticker
     if not symbol:
         return BackfillResult("no_security_symbol", before, before, ranges)
-    if dry_run or not ranges:
-        status = "complete" if before.coverage_complete else "missing_sessions"
-        return BackfillResult(status, before, before, ranges)
+    if dry_run:
+        return BackfillResult("missing_sessions", before, before, ranges)
     result = BackfillResult("missing_sessions", before, before, ranges)
     for range_start, range_end in ranges:
         result.provider_requests += 1
@@ -190,9 +204,12 @@ def backfill_missing_sessions(db: Session, provider: MarketDataProvider, securit
                 result.bars_updated += 1
         db.flush()
     db.commit()
-    result.coverage_after = coverage(db, security, start_date, end_date, provider=provider.name)
+    result.coverage_after = coverage(db, security, start_date, end_date, as_of_date=cutoff)
     if result.coverage_after.coverage_complete:
         result.status = "complete"
+    elif (not result.coverage_after.fetchable_missing_sessions
+          and result.coverage_after.future_missing_sessions):
+        result.status = "future_sessions_only"
     elif result.provider_errors:
         result.status = "provider_error"
     elif result.provider_no_data and not result.bars_created:
