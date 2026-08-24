@@ -46,6 +46,32 @@ evaluation, and a separately identified historical discovery reference.
 Historical discovery results are **not out-of-sample**; M8 prospective
 observations are kept separate.
 
+### Strict prospective
+
+`strict_prospective` requires canonical XNYS T-5 to be strictly later than the
+hypothesis version's freeze date. It remains the only primary M8 evidence.
+
+### Shadow prospective
+
+`shadow_prospective` is secondary validation evidence for mechanically admitted
+events whose canonical T-5 is on/before that version's freeze while the event is
+after it and still unseen when the signal is locked. It is not strict
+prospective and is never included in primary M8 statistics. The updater requires
+the exact T-5 DailyPrice and a complete canonical 21-session feature window;
+absence of an old M6 snapshot is therefore distinct from market-data absence.
+It never rewrites M6 snapshots, never admits historical outcomes retroactively,
+and attaches outcomes only after maturity using the frozen M8 definition.
+`lockup_prospective_signals.created_at` is the immutable signal-lock timestamp
+(also exposed as `signal_locked_at` by the dashboard API). Under the current
+date-level admission guard, a shadow lock's UTC date must be strictly before
+the canonical event session; reruns never replace this timestamp.
+Each future hypothesis version uses its own freeze metadata.
+
+```bash
+python scripts/update_prospective_signals.py --hypothesis-id m7_return20_vol20_minus5_post20 --evaluation-mode strict_prospective --dry-run
+python scripts/update_prospective_signals.py --hypothesis-id m7_return20_vol20_minus5_post20 --evaluation-mode shadow_prospective --dry-run
+```
+
 The dashboard uses these deterministic, read-only research endpoints:
 
 - `GET /api/research/hypothesis`

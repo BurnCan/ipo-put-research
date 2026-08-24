@@ -8,11 +8,13 @@ GROUPS = ("low_low", "low_high", "high_low", "high_high")
 
 def _median(xs): return statistics.median(xs) if xs else None
 
-def evaluate_prospective_signals(db, *, hypothesis_id):
+def evaluate_prospective_signals(db, *, hypothesis_id, evaluation_mode="strict_prospective"):
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
     rows = list(db.scalars(select(LockupProspectiveSignal).where(
         LockupProspectiveSignal.hypothesis_id == hypothesis_id,
-        LockupProspectiveSignal.evaluation_mode == "prospective",
+        LockupProspectiveSignal.evaluation_mode.in_(
+            ("strict_prospective", "prospective") if evaluation_mode == "strict_prospective"
+            else (evaluation_mode,)),
         LockupProspectiveSignal.signal_status != "unavailable"
     ).order_by(LockupProspectiveSignal.id)))
     matured = [r for r in rows if r.realized_outcome_value is not None]
@@ -29,5 +31,6 @@ def evaluate_prospective_signals(db, *, hypothesis_id):
             "median_bearish_mfe": _median([float(r.bearish_mfe_20d) for r in selected if r.bearish_mfe_20d is not None]),
             "median_bearish_mae": _median([float(r.bearish_mae_20d) for r in selected if r.bearish_mae_20d is not None])}
     return {"analysis_type": "prospective_out_of_sample_evaluation", "hypothesis_id": hypothesis_id,
+            "evaluation_mode": evaluation_mode,
             "total_signals": len(rows), "matured_signals": len(matured),
             "pending_signals": len(rows)-len(matured), "groups": groups}

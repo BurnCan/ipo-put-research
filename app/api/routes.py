@@ -7,7 +7,7 @@ from app.models import (Company, DailyPrice, Filing, FilingDocument, IPO, IPOFac
                         IPOMarketSummary, LockupEventAnalysis, LockupSignalSnapshot)
 from app.services.ipo_ingest import ingest_registration_filings
 from app.services.research_dashboard import (
-    GROUPS, get_historical_reference, get_prospective_evaluation,
+    GROUPS, get_historical_reference, get_prospective_evaluation, get_shadow_evaluation,
     get_prospective_signal_rows, get_research_summary, get_upcoming_lockups,
     hypothesis_metadata,
 )
@@ -61,17 +61,25 @@ def research_prospective_signals(
     status: str | None = None,
     interaction_group: str | None = Query(None),
     ticker: str | None = None,
+    evaluation_mode: str = Query("strict_prospective"),
     db: Session = Depends(get_db),
 ):
     if interaction_group is not None and interaction_group not in GROUPS:
         raise HTTPException(status_code=422, detail="unknown interaction group")
-    return get_prospective_signal_rows(db, status=status,
+    if evaluation_mode not in ("strict_prospective", "shadow_prospective"):
+        raise HTTPException(status_code=422, detail="unknown evaluation mode")
+    return get_prospective_signal_rows(db, status=status, evaluation_mode=evaluation_mode,
                                        interaction_group=interaction_group, ticker=ticker)
 
 
 @router.get("/research/prospective-evaluation")
 def research_prospective_evaluation(db: Session = Depends(get_db)):
     return get_prospective_evaluation(db)
+
+
+@router.get("/research/shadow-evaluation")
+def research_shadow_evaluation(db: Session = Depends(get_db)):
+    return get_shadow_evaluation(db)
 
 
 @router.get("/research/historical-reference")

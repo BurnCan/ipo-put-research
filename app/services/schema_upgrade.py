@@ -60,6 +60,7 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
         return [table]
     existing = {column["name"] for column in inspect(engine).get_columns(table)}
     definitions = {
+        "evaluation_mode": "VARCHAR(24) NOT NULL DEFAULT 'strict_prospective'",
         "unavailable_reason": "VARCHAR(64) NULL",
         "required_observation_date": "DATE NULL",
         "calendar_id": "VARCHAR(16) NULL",
@@ -68,11 +69,50 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
     }
     changed = []
     with engine.begin() as connection:
+        # Keep inspection on the same transactional connection as the DML
+        # below.  This is particularly important for in-memory SQLite engines
+        # backed by StaticPool, where an engine-level inspection may interfere
+        # with the transaction on the shared DBAPI connection.
+        inspector = inspect(connection)
         for name, definition in definitions.items():
             if name not in existing:
                 connection.execute(text(
                     f"ALTER TABLE lockup_prospective_signals ADD COLUMN {name} {definition}"))
                 changed.append(f"lockup_prospective_signals.{name}")
+        # The old spelling denoted the same strict prospective population.
+        # Migrate only when it cannot collide with an already locked strict
+        # row; compatibility reads continue to cover such pre-existing edge
+        # cases until their database is manually reconciled.
+        migrated = connection.execute(text("""
+            UPDATE lockup_prospective_signals AS legacy
+               SET evaluation_mode = 'strict_prospective'
+             WHERE evaluation_mode = 'prospective'
+               AND NOT EXISTS (
+                   SELECT 1 FROM lockup_prospective_signals AS strict_row
+                    WHERE strict_row.hypothesis_id = legacy.hypothesis_id
+                      AND strict_row.hypothesis_version = legacy.hypothesis_version
+                      AND strict_row.lockup_id = legacy.lockup_id
+                      AND strict_row.evaluation_mode = 'strict_prospective')
+        """))
+        if migrated.rowcount and migrated.rowcount > 0:
+            changed.append("lockup_prospective_signals.evaluation_mode_values")
+        if engine.dialect.name == "postgresql":
+            connection.execute(text(
+                "ALTER TABLE lockup_prospective_signals ALTER COLUMN evaluation_mode "
+                "SET DEFAULT 'strict_prospective'"))
+        constraint_names = {item.get("name") for item in
+                            inspector.get_unique_constraints(table)}
+        if (engine.dialect.name == "postgresql" and
+                "uq_prospective_hypothesis_lockup_mode" not in constraint_names):
+            # Mode is part of evidence identity, allowing strict and shadow to
+            # coexist without changing either locked record.
+            connection.execute(text(
+                "ALTER TABLE lockup_prospective_signals DROP CONSTRAINT IF EXISTS "
+                "uq_prospective_hypothesis_lockup"))
+            connection.execute(text(
+                "ALTER TABLE lockup_prospective_signals ADD CONSTRAINT "
+                "uq_prospective_hypothesis_lockup_mode UNIQUE "
+                "(hypothesis_id, hypothesis_version, lockup_id, evaluation_mode)"))
     return changed
 
 

@@ -57,10 +57,12 @@ def _signal_dict(signal, company):
               "calendar_version",
               "feature1_name", "feature1_value", "feature1_threshold", "feature1_side",
               "feature2_name", "feature2_value", "feature2_threshold", "feature2_side",
-              "interaction_group", "is_high_high", "signal_status",
+              "interaction_group", "is_high_high", "signal_status", "evaluation_mode",
               "realized_outcome_name", "realized_outcome_value",
               "outcome_observation_date", "bearish_mfe_20d", "bearish_mae_20d", "created_at")
     result = {name: getattr(signal, name) for name in fields}
+    # Public provenance name; ``created_at`` is the immutable lock timestamp.
+    result["signal_locked_at"] = signal.created_at
     result.update(company_name=company.name, ticker=company.ticker)
     for name in numeric:
         result[name] = float(result[name]) if result[name] is not None else None
@@ -68,11 +70,13 @@ def _signal_dict(signal, company):
 
 
 def get_prospective_signal_rows(db, *, status=None, interaction_group=None, ticker=None,
-                                evaluation_mode="prospective"):
+                                evaluation_mode="strict_prospective"):
     stmt = (select(LockupProspectiveSignal, Company)
             .join(IPO, IPO.id == LockupProspectiveSignal.ipo_id)
             .join(Company, Company.id == IPO.company_id)
-            .where(LockupProspectiveSignal.evaluation_mode == evaluation_mode))
+            .where(LockupProspectiveSignal.evaluation_mode.in_(
+                ("strict_prospective", "prospective") if evaluation_mode == "strict_prospective"
+                else (evaluation_mode,))))
     if status: stmt = stmt.where(LockupProspectiveSignal.signal_status == status)
     if interaction_group: stmt = stmt.where(LockupProspectiveSignal.interaction_group == interaction_group)
     if ticker: stmt = stmt.where(Company.ticker.ilike(ticker.strip()))
@@ -212,6 +216,12 @@ def get_research_summary(db, *, today=None):
 
 def get_prospective_evaluation(db):
     return evaluate_prospective_signals(db, hypothesis_id=HYPOTHESIS_ID)
+
+
+def get_shadow_evaluation(db):
+    """Secondary evidence only; never contributes to the primary M8 scorecard."""
+    return evaluate_prospective_signals(
+        db, hypothesis_id=HYPOTHESIS_ID, evaluation_mode="shadow_prospective")
 
 
 def get_historical_reference(db):
