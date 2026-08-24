@@ -108,8 +108,14 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
 
 def test_research_routes_are_get_only():
     routes = Path("app/api/routes.py").read_text(encoding="utf-8")
-    assert routes.count('@router.get("/research/') == 6
-    assert '@router.post("/research/' not in routes
+    required_get_routes = {
+        "hypothesis", "summary", "upcoming-lockups", "prospective-signals",
+        "prospective-evaluation", "shadow-evaluation", "historical-reference",
+    }
+    for route in required_get_routes:
+        assert f'@router.get("/research/{route}")' in routes
+    for method in ("post", "put", "patch", "delete"):
+        assert f'@router.{method}("/research/' not in routes
 
 
 def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():

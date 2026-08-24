@@ -114,6 +114,11 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
     for lockup, ipo, company in events:
         event_date = _event_date(lockup)
         if not event_date: report.unavailable += 1; continue
+        # A genuine strict signal is an immutable lock.  Find it before
+        # reconstructing eligibility from a snapshot or the current calendar:
+        # historical data repairs must never reclassify an already-locked row.
+        existing = _existing(db, hypothesis_id, spec.analysis_version, lockup.id,
+                             evaluation_mode)
         resolution = resolve_observation_session(event_date, spec.observation_offset)
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
@@ -121,12 +126,14 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
         # Strict retains its existing immutable M6 identity. Shadow deliberately
         # uses only the canonical calendar session and never this legacy identity.
-        observation_date = (snapshot.observation_date if evaluation_mode == STRICT and snapshot
-                            else resolution.observation_session)
+        observation_date = (existing.observation_date if existing is not None else
+                            snapshot.observation_date if evaluation_mode == STRICT and snapshot else
+                            resolution.observation_session)
         report.calendar_snapshot_mismatches += int(bool(
             snapshot and snapshot.observation_date != resolution.observation_session))
         event_session = resolve_event_session(event_date).event_session
-        timing_eligible = (observation_date > spec.prospective_start_date if evaluation_mode == STRICT else
+        timing_eligible = (True if existing is not None else
+                           observation_date > spec.prospective_start_date if evaluation_mode == STRICT else
                            observation_date <= spec.prospective_start_date < event_session)
         if not timing_eligible:
             # Preserve the original strict lifecycle audit record. It is not a
@@ -153,7 +160,6 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             continue
         report.eligible_events += 1
         if evaluation_mode == SHADOW: report.shadow_eligible_events += 1
-        existing = _existing(db, hypothesis_id, spec.analysis_version, lockup.id, evaluation_mode)
         if existing is None and evaluation_mode == SHADOW and today >= event_session:
             report.shadow_missed_lock_window += 1; continue
         security = db.scalar(select(Security).where(Security.company_id == ipo.company_id,
@@ -164,8 +170,15 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             continue
         values = None
         if existing is None and evaluation_mode == STRICT:
-            if observation_date > today: report.pending_observation += 1; continue
-            if snapshot is None or snapshot.observation_date != observation_date:
+            # A materialized M6 snapshot at the strict identity is authoritative
+            # even when an injected market as-of date precedes it.  Pending means
+            # that the required observation has not materialized, not that a
+            # valid frozen snapshot should be ignored.
+            if snapshot is None:
+                if observation_date > today: report.pending_observation += 1
+                else: report.waiting_for_market_data += 1
+                continue
+            if snapshot.observation_date != observation_date:
                 report.waiting_for_market_data += 1; continue
             values = (getattr(snapshot, spec.feature1), getattr(snapshot, spec.feature2))
         elif existing is None:
