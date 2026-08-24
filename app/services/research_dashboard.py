@@ -1,7 +1,7 @@
 """Read-only projections used by the lockup research dashboard."""
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from app.models import (Company, DailyPrice, IPO, IPOLockup,
                         LockupProspectiveSignal, LockupSignalSnapshot)
@@ -14,6 +14,31 @@ from app.services.prospective.evaluation import evaluate_prospective_signals
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
+STRICT_EVALUATION_MODES = ("strict_prospective", "prospective")
+
+
+def _signals_for_lockup(db, lockup_id, spec):
+    """Load and separate stored signal roles in an explicit, stable order."""
+    mode_order = case(
+        (LockupProspectiveSignal.evaluation_mode == "strict_prospective", 0),
+        (LockupProspectiveSignal.evaluation_mode == "prospective", 1),
+        (LockupProspectiveSignal.evaluation_mode == "shadow_prospective", 2),
+        (LockupProspectiveSignal.evaluation_mode == "lifecycle_tracking", 3),
+        else_=4,
+    )
+    rows = list(db.scalars(select(LockupProspectiveSignal).where(
+        LockupProspectiveSignal.lockup_id == lockup_id,
+        LockupProspectiveSignal.hypothesis_id == HYPOTHESIS_ID,
+        LockupProspectiveSignal.hypothesis_version == spec.analysis_version,
+    ).order_by(mode_order, LockupProspectiveSignal.id)))
+    return {
+        "strict_signal": next((row for row in rows
+                               if row.evaluation_mode in STRICT_EVALUATION_MODES), None),
+        "shadow_signal": next((row for row in rows
+                               if row.evaluation_mode == "shadow_prospective"), None),
+        "lifecycle_row": next((row for row in rows
+                               if row.evaluation_mode == "lifecycle_tracking"), None),
+    }
 
 
 def _classify_non_signaled(required_t5_date, today):
@@ -97,10 +122,9 @@ def get_upcoming_lockups(db, *, today=None):
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
-        signal = db.scalar(select(LockupProspectiveSignal).where(
-            LockupProspectiveSignal.lockup_id == lockup.id,
-            LockupProspectiveSignal.hypothesis_id == HYPOTHESIS_ID,
-            LockupProspectiveSignal.hypothesis_version == spec.analysis_version))
+        signals = _signals_for_lockup(db, lockup.id, spec)
+        signal = (signals["strict_signal"] or signals["shadow_signal"] or
+                  signals["lifecycle_row"])
         # Stored M8 state is authoritative.  Only snapshot-only rows belong to
         # historical discovery and must not leak into prospective monitoring.
         if signal is None and snapshot is not None and \
@@ -112,7 +136,8 @@ def get_upcoming_lockups(db, *, today=None):
         # preserve their observation date rather than recomputing identity.
         # Lifecycle rows, by contrast, use the stored calendar-derived field
         # when present and otherwise retain the canonical fallback.
-        if signal and signal.evaluation_mode == "prospective":
+        if signal and signal.evaluation_mode in (*STRICT_EVALUATION_MODES,
+                                                 "shadow_prospective"):
             required_t5_date = (signal.required_observation_date or
                                 signal.observation_date or
                                 resolution.observation_session)
@@ -125,7 +150,9 @@ def get_upcoming_lockups(db, *, today=None):
         else:
             status = _classify_non_signaled(required_t5_date, today)
         stored_t5_snapshot_date = snapshot.observation_date if snapshot else None
-        t5_timing_status = ("observation_before_prospective_start"
+        t5_timing_status = ("shadow_signal_frozen"
+                            if signal and signal.evaluation_mode == "shadow_prospective" else
+                            "observation_before_prospective_start"
                             if signal and signal.signal_status == "unavailable" else
                             "signal_frozen" if signal else
                             "t5_snapshot_available" if snapshot else
@@ -138,6 +165,11 @@ def get_upcoming_lockups(db, *, today=None):
             "event_trade_date": (signal.event_trade_date if signal else
                                  snapshot.event_trade_date if snapshot else None),
             "latest_market_date": latest, "m8_status": status,
+            "evaluation_mode": signal.evaluation_mode if signal else None,
+            "prospective_track": ("strict" if signal and
+                                  signal.evaluation_mode in STRICT_EVALUATION_MODES else
+                                  "shadow" if signal and
+                                  signal.evaluation_mode == "shadow_prospective" else None),
             "unavailable_reason": signal.unavailable_reason if signal else None,
             "has_minus5_snapshot": snapshot is not None,
             "minus5_observation_date": snapshot.observation_date if snapshot else None,
@@ -157,11 +189,20 @@ def get_upcoming_lockups(db, *, today=None):
                                  else resolution.calendar_version),
             "t5_snapshot_available": snapshot is not None,
             "t5_timing_status": t5_timing_status,
-            "return_20d_at_minus5": float(snapshot.return_20d) if snapshot and snapshot.return_20d is not None else None,
-            "realized_vol_20d_at_minus5": float(snapshot.realized_vol_20d) if snapshot and snapshot.realized_vol_20d is not None else None,
+            "return_20d_at_minus5": (float(signal.feature1_value)
+                if signal and signal.evaluation_mode in (*STRICT_EVALUATION_MODES,
+                    "shadow_prospective") and signal.feature1_value is not None
+                else float(snapshot.return_20d) if snapshot and snapshot.return_20d is not None
+                else None),
+            "realized_vol_20d_at_minus5": (float(signal.feature2_value)
+                if signal and signal.evaluation_mode in (*STRICT_EVALUATION_MODES,
+                    "shadow_prospective") and signal.feature2_value is not None
+                else float(snapshot.realized_vol_20d) if snapshot and snapshot.realized_vol_20d is not None
+                else None),
             "interaction_group": signal.interaction_group if signal else None,
             "is_high_high": bool(signal.is_high_high) if signal else False,
             "signal_created_at": signal.created_at if signal else None,
+            "signal_locked_at": signal.created_at if signal else None,
             "calendar_days_to_event": (event_date - today).days if event_date else None})
     return result
 
@@ -171,28 +212,29 @@ def get_research_summary(db, *, today=None):
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     categories = {"historical_unavailable": 0, "missed_t5_window": 0,
                   "pending_observation": 0, "waiting_for_market_data": 0,
-                  "prospective_signals": 0}
+                  "prospective_signals": 0, "shadow_signals": 0}
     prospective_rows = []
     cohort = _cohort(db)
     for lockup, _ipo, _company in cohort:
-        signal = db.scalar(select(LockupProspectiveSignal).where(
-            LockupProspectiveSignal.hypothesis_id == HYPOTHESIS_ID,
-            LockupProspectiveSignal.hypothesis_version == spec.analysis_version,
-            LockupProspectiveSignal.lockup_id == lockup.id))
+        signals = _signals_for_lockup(db, lockup.id, spec)
+        strict_signal = signals["strict_signal"]
+        shadow_signal = signals["shadow_signal"]
+        lifecycle_row = signals["lifecycle_row"]
+        categories["shadow_signals"] += int(shadow_signal is not None)
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
             LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION)
             .order_by(LockupSignalSnapshot.id))
-        # These four categories partition the clean cohort. Matured is a subset
-        # of prospective_signals, rather than another cohort bucket.
-        if signal is not None and signal.evaluation_mode == "prospective":
+        # Primary categories partition the clean cohort; shadow_signals is a
+        # separate secondary count and never enters prospective_signals.
+        if strict_signal is not None:
             categories["prospective_signals"] += 1
-            prospective_rows.append(signal)
-        elif (signal is not None and signal.evaluation_mode == "lifecycle_tracking" and
-              signal.signal_status == "unavailable"):
+            prospective_rows.append(strict_signal)
+        elif (shadow_signal is None and lifecycle_row is not None and
+              lifecycle_row.signal_status == "unavailable"):
             categories["missed_t5_window"] += 1
-        elif (signal is None and snapshot is not None and
+        elif (snapshot is not None and
               snapshot.observation_date <= spec.prospective_start_date):
             categories["historical_unavailable"] += 1
         else:
