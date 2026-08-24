@@ -1190,6 +1190,14 @@ python scripts/audit_market_data_coverage.py --ticker NBRG \
   --start-date 2026-07-22 --end-date 2026-07-29 --details
 ```
 
+Lockup-required audits report ancillary lockup rows that have no known event
+date as `no_known_event_date` and continue with every plannable row. Use
+`--primary-lockup-only` for the standard research-cohort validation commands;
+omit it when intentionally auditing non-primary lockups. An explicit
+`--start-date`/`--end-date` range does not require a lockup event date and
+deduplicates identical security/date-range work selected through multiple
+lockup rows.
+
 Targeted repair is a separate, explicitly actioned command.  Dry-run makes no
 provider calls and performs no writes; it displays missing sessions and the
 batched request ranges.  Replace `--dry-run` with `--execute` to reuse the
@@ -1197,8 +1205,11 @@ configured market-history provider and idempotent `DailyPrice` upserts.
 
 ```bash
 python scripts/backfill_market_data_gaps.py --ticker NBRG \
-  --lockup-required-range --dry-run
+  --primary-lockup-only --lockup-required-range --dry-run
 ```
+
+Backfill uses the same skip reporting, explicit-range behavior, and task
+deduplication as the read-only audit.
 
 Future canonical sessions remain visible to planning, but repair requests are
 capped at the current (or injected) as-of date and no placeholder rows are
