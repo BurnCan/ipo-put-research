@@ -8,6 +8,11 @@ GROUPS = ("low_low", "low_high", "high_low", "high_high")
 
 def _median(xs): return statistics.median(xs) if xs else None
 
+
+def is_bearish_outcome(value):
+    """Return the frozen evaluation's bearish-success test."""
+    return value is not None and float(value) < 0
+
 def evaluate_prospective_signals(db, *, hypothesis_id, evaluation_mode="strict_prospective"):
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
     rows = list(db.scalars(select(LockupProspectiveSignal).where(
@@ -22,8 +27,8 @@ def evaluate_prospective_signals(db, *, hypothesis_id, evaluation_mode="strict_p
     for name in GROUPS:
         selected = [r for r in matured if r.interaction_group == name]
         values = [float(r.realized_outcome_value) for r in selected]; n = len(values)
-        groups[name] = {"n_events": n, "bearish_hit_count": sum(v < 0 for v in values),
-            "bearish_hit_rate": sum(v < 0 for v in values)/n if n else None,
+        groups[name] = {"n_events": n, "bearish_hit_count": sum(is_bearish_outcome(v) for v in values),
+            "bearish_hit_rate": sum(is_bearish_outcome(v) for v in values)/n if n else None,
             "mean_outcome": statistics.fmean(values) if values else None, "median_outcome": _median(values),
             "le_5pct_rate": sum(v <= -.05 for v in values)/n if n else None,
             "le_10pct_rate": sum(v <= -.10 for v in values)/n if n else None,

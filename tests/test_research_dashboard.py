@@ -13,7 +13,8 @@ from app.models import (Company, Filing, IPO, IPOLockup, LockupProspectiveSignal
                         LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
-from app.services.research_dashboard import (HYPOTHESIS_ID, get_research_summary,
+from app.services.research_dashboard import (HYPOTHESIS_ID, classify_prospective_result,
+                                               get_research_summary,
                                                get_upcoming_lockups,
                                                hypothesis_metadata)
 from app.services import research_dashboard
@@ -320,6 +321,60 @@ def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels
     assert "No prospective outcomes have matured yet." in page
     assert "Not eligible prospectively" in page
     assert "T-5 observation predates hypothesis freeze" in page
+    for label in ("Pre-event 20d return", "Pre-event 20d realized vol",
+                  "Outcome status", "Post-event 20d return", "Result"):
+        assert label in page
+        assert f'data-label="{label}"' in page
+
+
+def test_result_classification_is_mature_only_target_aware_and_track_agnostic():
+    class Signal:
+        signal_status = "matured"
+        interaction_group = "high_high"
+        realized_outcome_value = -.01
+
+    signal = Signal()
+    assert classify_prospective_result(signal) == "bearish_hit"
+    signal.realized_outcome_value = .01
+    assert classify_prospective_result(signal) == "no_bearish_hit"
+    for group in ("high_low", "low_high", "low_low"):
+        signal.interaction_group = group
+        signal.realized_outcome_value = -.01
+        assert classify_prospective_result(signal) == "bearish_non_target"
+        signal.realized_outcome_value = .01
+        assert classify_prospective_result(signal) == "non_target"
+    signal.signal_status = "awaiting_outcome"
+    signal.realized_outcome_value = -.50
+    assert classify_prospective_result(signal) is None
+
+
+def test_upcoming_projects_only_stored_mature_outcome_and_provenance():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        signal.signal_status = "awaiting_outcome"
+        signal.realized_outcome_value = -.99  # defensive: partial/stale is hidden
+        db.commit()
+        row = next(r for r in get_upcoming_lockups(db) if r["lockup_id"] == signaled_id)
+        assert row["outcome_status"] == "awaiting_outcome"
+        assert row["post_event_20d_return"] is None
+        assert row["result"] is None
+
+        signal.signal_status = "matured"
+        signal.interaction_group = "high_high"
+        signal.is_high_high = True
+        signal.realized_outcome_name = "post_20d_return"
+        signal.realized_outcome_value = -.1234
+        signal.outcome_observation_date = date(2026, 9, 28)
+        db.commit()
+        row = next(r for r in get_upcoming_lockups(db) if r["lockup_id"] == signaled_id)
+        assert row["realized_outcome_name"] == "post_20d_return"
+        assert row["post_event_20d_return"] == -.1234
+        assert row["outcome_observation_date"] == date(2026, 9, 28)
+        assert row["result"] == "bearish_hit"
+    finally:
+        db.close()
 
 
 def test_dashboard_separates_missed_t5_window_from_waiting_and_history():

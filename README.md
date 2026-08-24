@@ -46,6 +46,16 @@ evaluation, and a separately identified historical discovery reference.
 Historical discovery results are **not out-of-sample**; M8 prospective
 observations are kept separate.
 
+The upcoming-events table presents each observation's read-only research
+lifecycle. **Pre-event 20d return** is the 20-session return ending at T-5, and
+**Pre-event 20d realized vol** is realized volatility over that same lookback.
+**Frozen group** is the immutable classification produced by the frozen
+thresholds. **Outcome status** reports the stored lifecycle after signal lock;
+**Post-event 20d return** is the frozen realized +20-session outcome; and
+**Result** interprets that outcome relative to the frozen hypothesis. A bearish
+outcome in a non-target group is identified as non-target and is never counted
+as a hypothesis hit.
+
 ### Strict prospective
 
 `strict_prospective` requires canonical XNYS T-5 to be strictly later than the
