@@ -8,6 +8,11 @@ GROUPS = ("low_low", "low_high", "high_low", "high_high")
 
 def _median(xs): return statistics.median(xs) if xs else None
 
+
+def is_bearish_outcome(value):
+    """Return the frozen evaluation's bearish-success test."""
+    return value is not None and float(value) < 0
+
 def evaluate_prospective_signals(db, *, hypothesis_id, evaluation_mode="strict_prospective"):
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
     rows = list(db.scalars(select(LockupProspectiveSignal).where(
@@ -22,15 +27,26 @@ def evaluate_prospective_signals(db, *, hypothesis_id, evaluation_mode="strict_p
     for name in GROUPS:
         selected = [r for r in matured if r.interaction_group == name]
         values = [float(r.realized_outcome_value) for r in selected]; n = len(values)
-        groups[name] = {"n_events": n, "bearish_hit_count": sum(v < 0 for v in values),
-            "bearish_hit_rate": sum(v < 0 for v in values)/n if n else None,
+        # Compatibility note: these legacy per-group "bearish hit" fields count
+        # every negative outcome.  They are descriptive negative-outcome metrics,
+        # not counts of hits on the frozen high_high target hypothesis.
+        groups[name] = {"n_events": n, "bearish_hit_count": sum(is_bearish_outcome(v) for v in values),
+            "bearish_hit_rate": sum(is_bearish_outcome(v) for v in values)/n if n else None,
             "mean_outcome": statistics.fmean(values) if values else None, "median_outcome": _median(values),
             "le_5pct_rate": sum(v <= -.05 for v in values)/n if n else None,
             "le_10pct_rate": sum(v <= -.10 for v in values)/n if n else None,
             "le_20pct_rate": sum(v <= -.20 for v in values)/n if n else None,
             "median_bearish_mfe": _median([float(r.bearish_mfe_20d) for r in selected if r.bearish_mfe_20d is not None]),
             "median_bearish_mae": _median([float(r.bearish_mae_20d) for r in selected if r.bearish_mae_20d is not None])}
+    bearish_outcomes = sum(
+        is_bearish_outcome(row.realized_outcome_value) for row in matured)
+    target_bearish_hits = sum(
+        row.interaction_group == "high_high"
+        and is_bearish_outcome(row.realized_outcome_value)
+        for row in matured)
     return {"analysis_type": "prospective_out_of_sample_evaluation", "hypothesis_id": hypothesis_id,
             "evaluation_mode": evaluation_mode,
             "total_signals": len(rows), "matured_signals": len(matured),
-            "pending_signals": len(rows)-len(matured), "groups": groups}
+            "pending_signals": len(rows)-len(matured),
+            "target_bearish_hits": target_bearish_hits,
+            "bearish_outcomes": bearish_outcomes, "groups": groups}

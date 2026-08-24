@@ -10,11 +10,23 @@ from app.services.backtest.analysis import (FROZEN_HYPOTHESES,
 from app.services.backtest.dataset import build_backtest_dataset
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
 from app.services.market_calendar import resolve_observation_session
-from app.services.prospective.evaluation import evaluate_prospective_signals
+from app.services.prospective.evaluation import (evaluate_prospective_signals,
+                                                  is_bearish_outcome)
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
 STRICT_EVALUATION_MODES = ("strict_prospective", "prospective")
+
+
+def classify_prospective_result(signal, spec=None):
+    """Interpret only a stored, mature outcome relative to the frozen target."""
+    if signal is None or signal.signal_status != "matured" or \
+            signal.realized_outcome_value is None:
+        return None
+    bearish = is_bearish_outcome(signal.realized_outcome_value)
+    if signal.interaction_group == "high_high":
+        return "bearish_hit" if bearish else "no_bearish_hit"
+    return "bearish_non_target" if bearish else "non_target"
 
 
 def _signals_for_lockup(db, lockup_id, spec):
@@ -84,7 +96,8 @@ def _signal_dict(signal, company):
               "feature2_name", "feature2_value", "feature2_threshold", "feature2_side",
               "interaction_group", "is_high_high", "signal_status", "evaluation_mode",
               "realized_outcome_name", "realized_outcome_value",
-              "outcome_observation_date", "bearish_mfe_20d", "bearish_mae_20d", "created_at")
+              "outcome_observation_date", "outcome_attached_at", "bearish_mfe_20d",
+              "bearish_mae_20d", "created_at")
     result = {name: getattr(signal, name) for name in fields}
     # Public provenance name; ``created_at`` is the immutable lock timestamp.
     result["signal_locked_at"] = signal.created_at
@@ -201,6 +214,23 @@ def get_upcoming_lockups(db, *, today=None):
                 else None),
             "interaction_group": signal.interaction_group if signal else None,
             "is_high_high": bool(signal.is_high_high) if signal else False,
+            "outcome_status": signal.signal_status if signal else None,
+            "realized_outcome_name": signal.realized_outcome_name if signal else None,
+            # Outcomes are projected only from immutable stored signal evidence.
+            "realized_outcome_value": (float(signal.realized_outcome_value)
+                if signal and signal.signal_status == "matured" and
+                signal.realized_outcome_value is not None else None),
+            "post_event_20d_return": (float(signal.realized_outcome_value)
+                if signal and signal.signal_status == "matured" and
+                signal.realized_outcome_value is not None else None),
+            "outcome_observation_date": (signal.outcome_observation_date
+                                         if signal else None),
+            "outcome_attached_at": signal.outcome_attached_at if signal else None,
+            "bearish_mfe_20d": (float(signal.bearish_mfe_20d)
+                                 if signal and signal.bearish_mfe_20d is not None else None),
+            "bearish_mae_20d": (float(signal.bearish_mae_20d)
+                                 if signal and signal.bearish_mae_20d is not None else None),
+            "result": classify_prospective_result(signal, spec),
             "signal_created_at": signal.created_at if signal else None,
             "signal_locked_at": signal.created_at if signal else None,
             "calendar_days_to_event": (event_date - today).days if event_date else None})

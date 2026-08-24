@@ -298,6 +298,70 @@ def test_signal_lock_timestamp_is_populated_once_on_rerun():
         db.close()
 
 
+@pytest.mark.parametrize(("group", "outcome", "expected_outcomes", "expected_hits"), [
+    pytest.param("high_low", -.10, 1, 0, id="non-target-negative-is-not-a-hit"),
+    pytest.param("high_high", -.10, 1, 1, id="target-negative-is-a-hit"),
+    pytest.param("high_high", .10, 0, 0, id="target-positive-is-not-a-hit"),
+])
+def test_prospective_scorecard_distinguishes_outcomes_from_target_hits(
+        group, outcome, expected_outcomes, expected_hits):
+    db = _database_with_snapshot(CUTOFF + timedelta(days=1))
+    try:
+        update_prospective_lockup_signals(db, hypothesis_id=HYPOTHESIS_ID)
+        row = db.scalar(select(LockupProspectiveSignal))
+        row.interaction_group = group
+        row.is_high_high = group == "high_high"
+        row.signal_status = "matured"
+        row.realized_outcome_value = outcome
+        db.commit()
+
+        result = evaluate_prospective_signals(db, hypothesis_id=HYPOTHESIS_ID)
+
+        assert result["bearish_outcomes"] == expected_outcomes
+        assert result["target_bearish_hits"] == expected_hits
+        # The existing group field intentionally retains its historical meaning.
+        assert result["groups"][group]["bearish_hit_count"] == expected_outcomes
+    finally:
+        db.close()
+
+
+def test_primary_and_shadow_scorecards_are_statistically_separate():
+    db = _database_with_snapshot(CUTOFF + timedelta(days=1))
+    try:
+        update_prospective_lockup_signals(db, hypothesis_id=HYPOTHESIS_ID)
+        strict = db.scalar(select(LockupProspectiveSignal))
+        strict.interaction_group = "high_high"
+        strict.is_high_high = True
+        strict.signal_status = "matured"
+        strict.realized_outcome_value = -.10
+        columns = [column.name for column in LockupProspectiveSignal.__table__.columns
+                   if column.name != "id"]
+        selected = ["'shadow_prospective'" if name == "evaluation_mode" else name
+                    for name in columns]
+        db.flush()
+        db.execute(text(
+            f"INSERT INTO lockup_prospective_signals ({', '.join(columns)}) "
+            f"SELECT {', '.join(selected)} FROM lockup_prospective_signals"))
+        shadow = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.evaluation_mode == "shadow_prospective"))
+        shadow.interaction_group = "high_low"
+        shadow.is_high_high = False
+        shadow.realized_outcome_value = -.20
+        db.commit()
+
+        primary_result = evaluate_prospective_signals(db, hypothesis_id=HYPOTHESIS_ID)
+        shadow_result = evaluate_prospective_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, evaluation_mode="shadow_prospective")
+
+        assert (primary_result["bearish_outcomes"],
+                primary_result["target_bearish_hits"]) == (1, 1)
+        assert (shadow_result["bearish_outcomes"],
+                shadow_result["target_bearish_hits"]) == (1, 0)
+        assert primary_result["total_signals"] == shadow_result["total_signals"] == 1
+    finally:
+        db.close()
+
+
 def _database_with_shadow_timing():
     """Return a deterministic pre-freeze T-5 / post-freeze event fixture."""
     db = _database_with_snapshot(date(2026, 8, 18))
