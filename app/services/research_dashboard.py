@@ -61,6 +61,8 @@ def _signal_dict(signal, company):
               "realized_outcome_name", "realized_outcome_value",
               "outcome_observation_date", "bearish_mfe_20d", "bearish_mae_20d", "created_at")
     result = {name: getattr(signal, name) for name in fields}
+    # Public provenance name; ``created_at`` is the immutable lock timestamp.
+    result["signal_locked_at"] = signal.created_at
     result.update(company_name=company.name, ticker=company.ticker)
     for name in numeric:
         result[name] = float(result[name]) if result[name] is not None else None
