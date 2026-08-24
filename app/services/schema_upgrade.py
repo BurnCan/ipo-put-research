@@ -69,6 +69,11 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
     }
     changed = []
     with engine.begin() as connection:
+        # Keep inspection on the same transactional connection as the DML
+        # below.  This is particularly important for in-memory SQLite engines
+        # backed by StaticPool, where an engine-level inspection may interfere
+        # with the transaction on the shared DBAPI connection.
+        inspector = inspect(connection)
         for name, definition in definitions.items():
             if name not in existing:
                 connection.execute(text(
@@ -96,7 +101,7 @@ def upgrade_milestone_8(engine: Engine) -> list[str]:
                 "ALTER TABLE lockup_prospective_signals ALTER COLUMN evaluation_mode "
                 "SET DEFAULT 'strict_prospective'"))
         constraint_names = {item.get("name") for item in
-                            inspect(engine).get_unique_constraints(table)}
+                            inspector.get_unique_constraints(table)}
         if (engine.dialect.name == "postgresql" and
                 "uq_prospective_hypothesis_lockup_mode" not in constraint_names):
             # Mode is part of evidence identity, allowing strict and shadow to
