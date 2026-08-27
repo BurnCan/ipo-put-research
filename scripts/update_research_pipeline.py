@@ -151,19 +151,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, session_factory=None) -> int:
+    """Run the pipeline, optionally using a supplied provenance session factory."""
     args = build_parser().parse_args(argv)
     # Preserve existing relative .env/data behavior even when cron starts elsewhere.
     original_cwd = Path.cwd()
     os.chdir(PROJECT_ROOT)
     tracker = None
     try:
-        from app.db import SessionLocal
         from app.services.pipeline_runs import finish_run, finish_stage, start_run, start_stage
+
+        if session_factory is None:
+            from app.db import SessionLocal
+
+            session_factory = SessionLocal
 
         class Tracker:
             def __init__(self):
-                self.db = SessionLocal()
+                self.db = session_factory()
                 self.current_stage_id = None
                 enabled = 3 - sum((args.skip_market_history, args.skip_m6, args.skip_m8))
                 self.run = start_run(self.db, trigger=os.environ.get("PIPELINE_TRIGGER", "manual"),

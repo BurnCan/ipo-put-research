@@ -1,6 +1,7 @@
 import fcntl
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import types
@@ -22,6 +23,15 @@ SPEC = importlib.util.spec_from_file_location("update_research_pipeline", SCRIPT
 pipeline = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(pipeline)
+
+
+@pytest.fixture
+def provenance_database():
+    """Return an offline session factory and engine for calls to pipeline.main()."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return lambda: Session(engine), engine
 
 
 def test_success_order_results_timestamps_cohort_and_frozen_hypothesis(monkeypatch):
@@ -78,7 +88,8 @@ def test_failure_is_fail_fast(failed_stage):
     assert report["finished_at"].endswith("+00:00")
 
 
-def test_main_exit_logging_parent_creation_dry_run_and_skips(tmp_path, monkeypatch, capsys):
+def test_main_exit_logging_parent_creation_dry_run_and_skips(
+        tmp_path, monkeypatch, capsys, provenance_database):
     seen = []
 
     def fake_run(**kwargs):
@@ -91,8 +102,10 @@ def test_main_exit_logging_parent_creation_dry_run_and_skips(tmp_path, monkeypat
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run)
     log = tmp_path / "missing" / "daily.log"
     lock = tmp_path / "pipeline.lock"
+    session_factory, _engine = provenance_database
     assert pipeline.main(["--dry-run", "--skip-market-history", "--skip-m6",
-                          "--log-file", str(log), "--lock-file", str(lock)]) == 0
+                          "--log-file", str(log), "--lock-file", str(lock)],
+                         session_factory=session_factory) == 0
     assert seen[0]["dry_run"] is True
     assert seen[0]["skip_market_history"] is True
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
@@ -101,12 +114,14 @@ def test_main_exit_logging_parent_creation_dry_run_and_skips(tmp_path, monkeypat
     assert len(log.read_text().splitlines()) == 2
 
 
-def test_main_failed_status_has_nonzero_exit(tmp_path, monkeypatch):
+def test_main_failed_status_has_nonzero_exit(tmp_path, monkeypatch, provenance_database):
     monkeypatch.setattr(pipeline, "run_pipeline", lambda **kwargs: {
         "status": "failed", "started_at": "a", "finished_at": "b", "stages": {},
         "failed_stage": "market_history", "error": "failure",
     })
-    assert pipeline.main(["--lock-file", str(tmp_path / "lock")]) == 1
+    session_factory, _engine = provenance_database
+    assert pipeline.main(["--lock-file", str(tmp_path / "lock")],
+                         session_factory=session_factory) == 1
 
 
 def test_lock_prevents_overlap_and_releases_after_success_and_exception(tmp_path):
@@ -125,16 +140,14 @@ def test_lock_prevents_overlap_and_releases_after_success_and_exception(tmp_path
 
 
 def test_already_running_main_status_is_persisted_without_failed_stage(
-        tmp_path, capsys, monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    monkeypatch.setattr(app.db, "SessionLocal", lambda: Session(engine))
+        tmp_path, capsys, provenance_database):
+    session_factory, engine = provenance_database
     lock = tmp_path / "lock"
     lock.touch()
     with lock.open("a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert pipeline.main(["--lock-file", str(lock)]) == 1
+        assert pipeline.main(["--lock-file", str(lock)],
+                             session_factory=session_factory) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "already_running"
     with Session(engine) as db:
         runs = db.scalars(select(PipelineRun)).all()
@@ -169,25 +182,53 @@ def test_project_root_is_on_sys_path_for_runtime_imports():
 
 
 def test_direct_script_run_is_cwd_independent(tmp_path):
+    database_path = tmp_path / "pipeline.sqlite3"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = database_url
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "--skip-market-history", "--skip-m6", "--skip-m8",
          "--lock-file", str(tmp_path / "pipeline.lock")],
-        cwd=tmp_path, text=True, capture_output=True, timeout=10, check=False,
+        cwd=tmp_path, env=environment, text=True, capture_output=True, timeout=10, check=False,
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["status"] == "ok"
+    with Session(engine) as db:
+        runs = db.scalars(select(PipelineRun)).all()
+        assert len(runs) == 1
+        assert runs[0].status == "succeeded"
+        assert db.scalars(select(PipelineStageRun)).all() == []
 
 
-def test_main_restores_callers_cwd(tmp_path, monkeypatch):
+def test_main_restores_callers_cwd(tmp_path, monkeypatch, provenance_database):
     caller_cwd = tmp_path / "caller"
     caller_cwd.mkdir()
     monkeypatch.chdir(caller_cwd)
 
+    session_factory, _engine = provenance_database
     assert pipeline.main([
         "--skip-market-history", "--skip-m6", "--skip-m8",
         "--lock-file", str(tmp_path / "pipeline.lock"),
-    ]) == 0
+    ], session_factory=session_factory) == 0
     assert Path.cwd() == caller_cwd
+
+
+def test_main_with_injected_session_never_constructs_application_session(
+        tmp_path, monkeypatch, provenance_database):
+    session_factory, engine = provenance_database
+
+    def unexpected_application_session():
+        raise AssertionError("application SessionLocal must not be used")
+
+    monkeypatch.setattr(app.db, "SessionLocal", unexpected_application_session)
+    assert pipeline.main([
+        "--skip-market-history", "--skip-m6", "--skip-m8",
+        "--lock-file", str(tmp_path / "pipeline.lock"),
+    ], session_factory=session_factory) == 0
+    with Session(engine) as db:
+        assert db.query(PipelineRun).count() == 1
 
 
 def test_market_history_runtime_imports_resolve(monkeypatch):
