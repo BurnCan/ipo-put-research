@@ -94,6 +94,7 @@ def run_pipeline(
     market_stage: Callable[[], Any] = run_market_history,
     m6_stage: Callable[[], Any] = run_m6_analysis,
     m8_stage: Callable[..., Any] = run_m8_prospective,
+    tracker=None,
 ) -> dict[str, Any]:
     """Execute enabled stages in dependency order and return one report."""
     report: dict[str, Any] = {"status": "ok", "started_at": _now(), "stages": {}}
@@ -107,6 +108,7 @@ def run_pipeline(
             report["stages"][name] = {"status": "skipped"}
             continue
         started_at, timer = _now(), monotonic()
+        stage_id = tracker.start_stage(name) if tracker else None
         try:
             result = operation(**kwargs)
         except Exception as exc:  # The structured failure is the CLI's public error contract.
@@ -117,7 +119,11 @@ def run_pipeline(
             }
             report.update(status="failed", failed_stage=name,
                           error=f"{type(exc).__name__}: {exc}", finished_at=_now())
+            if tracker:
+                tracker.finish_stage(stage_id, 1, report["error"])
             return report
+        if tracker:
+            tracker.finish_stage(stage_id, 0)
         report["stages"][name] = {
             "status": "ok", "started_at": started_at, "finished_at": _now(),
             "duration_seconds": round(monotonic() - timer, 6), "result": _jsonable(result),
@@ -150,25 +156,59 @@ def main(argv: list[str] | None = None) -> int:
     # Preserve existing relative .env/data behavior even when cron starts elsewhere.
     original_cwd = Path.cwd()
     os.chdir(PROJECT_ROOT)
+    tracker = None
     try:
+        from app.db import SessionLocal
+        from app.services.pipeline_runs import finish_run, finish_stage, start_run, start_stage
+
+        class Tracker:
+            def __init__(self):
+                self.db = SessionLocal()
+                self.current_stage_id = None
+                enabled = 3 - sum((args.skip_market_history, args.skip_m6, args.skip_m8))
+                self.run = start_run(self.db, trigger=os.environ.get("PIPELINE_TRIGGER", "manual"),
+                                     stages_total=enabled)
+            def start_stage(self, name):
+                self.current_stage_id = start_stage(self.db, self.run.id, name).id
+                return self.current_stage_id
+            def finish_stage(self, stage_id, code, error=None):
+                finish_stage(self.db, stage_id, exit_code=code, error=error)
+                self.current_stage_id = None
+            def finish(self, code, error=None, status=None):
+                if self.current_stage_id is not None:
+                    finish_stage(self.db, self.current_stage_id, exit_code=code or 1, error=error)
+                    self.current_stage_id = None
+                finish_run(self.db, self.run.id, exit_code=code, error=error, status=status)
+                self.db.close()
+
+        tracker = Tracker()
         try:
             with pipeline_lock(args.lock_file.resolve()):
                 report = run_pipeline(
                     dry_run=args.dry_run, skip_market_history=args.skip_market_history,
                     skip_m6=args.skip_m6, skip_m8=args.skip_m8,
+                    tracker=tracker,
                 )
         except AlreadyRunningError as exc:
             timestamp = _now()
             report = {"status": "already_running", "started_at": timestamp,
                       "finished_at": timestamp, "stages": {}, "error": str(exc)}
+        exit_code = 0 if report["status"] == "ok" else 1
+        persisted_status = "already_running" if report["status"] == "already_running" else None
+        tracker.finish(exit_code, report.get("error"), status=persisted_status)
         log_file = args.log_file.resolve() if args.log_file else None
+    except BaseException as exc:
+        # Includes interrupts: make a best effort not to strand an execution as running.
+        if tracker:
+            tracker.finish(1, f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         os.chdir(original_cwd)
     output = json.dumps(report, indent=2, sort_keys=True)
     print(output)
     if log_file:
         _append_log(log_file, report)
-    return 0 if report["status"] == "ok" else 1
+    return exit_code
 
 
 if __name__ == "__main__":

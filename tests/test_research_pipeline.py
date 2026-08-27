@@ -7,6 +7,13 @@ import types
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+import app.db
+from app.db import Base
+from app.models import PipelineRun, PipelineStageRun
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,13 +124,26 @@ def test_lock_prevents_overlap_and_releases_after_success_and_exception(tmp_path
         pass
 
 
-def test_already_running_main_status(tmp_path, capsys):
+def test_already_running_main_status_is_persisted_without_failed_stage(
+        tmp_path, capsys, monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(app.db, "SessionLocal", lambda: Session(engine))
     lock = tmp_path / "lock"
     lock.touch()
     with lock.open("a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert pipeline.main(["--lock-file", str(lock)]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "already_running"
+    with Session(engine) as db:
+        runs = db.scalars(select(PipelineRun)).all()
+        assert len(runs) == 1
+        assert runs[0].status == "already_running"
+        assert runs[0].exit_code == 1
+        assert runs[0].finished_at is not None
+        assert runs[0].stages_failed == 0
+        assert db.scalars(select(PipelineStageRun)).all() == []
 
 
 def test_script_help_is_cwd_independent_and_noninteractive(tmp_path):

@@ -122,6 +122,41 @@ class DailyPrice(Base):
     security: Mapped[Security] = relationship(back_populates="prices")
 
 
+class PipelineRun(Base):
+    """One observed invocation of an operational pipeline (never inferred from data)."""
+    __tablename__ = "pipeline_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pipeline_name: Mapped[str] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trigger: Mapped[str] = mapped_column(String(16))
+    hostname: Mapped[str] = mapped_column(String(255))
+    stages_total: Mapped[int] = mapped_column(Integer, default=0)
+    stages_succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    stages_failed: Mapped[int] = mapped_column(Integer, default=0)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    stages: Mapped[list["PipelineStageRun"]] = relationship(
+        back_populates="pipeline_run", cascade="all, delete-orphan")
+
+
+class PipelineStageRun(Base):
+    """Execution provenance for an actual stage within a pipeline run."""
+    __tablename__ = "pipeline_stage_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pipeline_run_id: Mapped[int] = mapped_column(
+        ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    stage_name: Mapped[str] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pipeline_run: Mapped[PipelineRun] = relationship(back_populates="stages")
+
+
 class IPOMarketSummary(Base):
     __tablename__ = "ipo_market_summary"
     id: Mapped[int] = mapped_column(primary_key=True)

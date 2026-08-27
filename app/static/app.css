@@ -2,3 +2,4 @@
 .section-subtitle{margin:.35rem 0 0;color:var(--muted);font-size:.85rem}.secondary-button{color:#d5e0ec;background:#111a25;border:1px solid var(--line);padding:9px 13px;border-radius:8px;font:inherit;cursor:pointer}.secondary-button:hover,.secondary-button:focus-visible{border-color:var(--cyan);outline:2px solid transparent}.event-date,.event-proximity{display:block}.event-proximity{color:#b8c7d9;font-size:.79rem;font-weight:650;margin-top:5px}.status-detail{white-space:normal}
 
 [hidden]{display:none!important}
+.pipeline-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}.pipeline-grid article{display:flex;flex-direction:column;gap:6px}.pipeline-grid span,.pipeline-grid small{color:var(--muted)}
