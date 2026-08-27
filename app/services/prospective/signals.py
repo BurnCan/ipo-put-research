@@ -90,8 +90,12 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
                                       classification_status="classified",
                                       candidate_type="operating_company_ipo", offering_status="priced",
                                       primary_lockup_only=True, ticker=None, ipo_id=None, limit=None,
-                                      dry_run=False, as_of_date=None):
-    """Advance one explicitly selected mode; locked classifications are never rewritten."""
+                                      dry_run=False, as_of_date=None,
+                                      now_utc: datetime | None = None):
+    """Advance a mode, optionally using an injected UTC signal-lock timestamp."""
+    if (now_utc is not None
+            and (now_utc.tzinfo is None or now_utc.utcoffset() != UTC.utcoffset(now_utc))):
+        raise ValueError("now_utc must be a timezone-aware UTC datetime")
     if evaluation_mode == LEGACY_STRICT: evaluation_mode = STRICT
     if evaluation_mode not in (STRICT, SHADOW): raise ValueError("unknown evaluation mode")
     if hypothesis_id not in FROZEN_HYPOTHESES: raise ValueError(f"unknown frozen hypothesis: {hypothesis_id}")
@@ -198,7 +202,7 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             else: report.waiting_for_market_data += 1
             continue
         if existing is None:
-            signal_locked_at = datetime.now(UTC)
+            signal_locked_at = now_utc or datetime.now(UTC)
             # Shadow admission is date-level: durable lock provenance must be
             # strictly earlier than the canonical event session.
             if evaluation_mode == SHADOW and signal_locked_at.date() >= event_session:

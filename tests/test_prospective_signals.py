@@ -1,6 +1,6 @@
 """Offline regression tests for the M8 prospective cutoff boundary."""
 import json
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -421,7 +421,8 @@ def test_shadow_exact_window_features_equal_m6_snapshot_computation():
 
         report = update_prospective_lockup_signals(
             db, hypothesis_id=HYPOTHESIS_ID, evaluation_mode="shadow_prospective",
-            as_of_date=CUTOFF)
+            as_of_date=CUTOFF,
+            now_utc=datetime(2026, 8, 24, 12, tzinfo=UTC))
         signal = db.scalar(select(LockupProspectiveSignal).where(
             LockupProspectiveSignal.evaluation_mode == "shadow_prospective"))
 
