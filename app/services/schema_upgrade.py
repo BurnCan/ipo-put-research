@@ -137,6 +137,40 @@ def upgrade_milestone_6(engine: Engine) -> list[str]:
         if table.name not in existing:
             table.create(engine, checkfirst=True)
             changed.append(table.name)
+    snapshot_table = LockupSignalSnapshot.__tablename__
+    existing_columns = {column["name"] for column in inspect(engine).get_columns(snapshot_table)}
+    definitions = {
+        "calendar_id": "VARCHAR(16) NULL",
+        "calendar_provider": "VARCHAR(32) NULL",
+        "calendar_version": "VARCHAR(32) NULL",
+        "snapshot_status": "VARCHAR(16) NULL",
+        "unavailable_reason": "VARCHAR(64) NULL",
+        "expected_history_start_date": "DATE NULL",
+        "expected_history_end_date": "DATE NULL",
+        "expected_history_sessions": "INTEGER NULL",
+        "missing_history_sessions": "INTEGER NULL",
+    }
+    with engine.begin() as connection:
+        for name, definition in definitions.items():
+            if name not in existing_columns:
+                connection.execute(text(
+                    f"ALTER TABLE {snapshot_table} ADD COLUMN {name} {definition}"))
+                changed.append(f"{snapshot_table}.{name}")
+        # V1 always had an observation bar. V2 deliberately persists an
+        # unavailable row when that canonical bar is absent.
+        if engine.dialect.name == "postgresql":
+            nullable_v2_fields = {
+                "data_cutoff_date", "trading_sessions_since_first_trade",
+                "available_history_sessions", "close", "post_ipo_high_to_date",
+                "post_ipo_low_to_date",
+            }
+            column_state = {column["name"]: column for column in inspect(connection).get_columns(
+                snapshot_table)}
+            for name in nullable_v2_fields:
+                if not column_state[name]["nullable"]:
+                    connection.execute(text(
+                        f"ALTER TABLE {snapshot_table} ALTER COLUMN {name} DROP NOT NULL"))
+                    changed.append(f"{snapshot_table}.{name}.nullable")
     return changed
 
 
