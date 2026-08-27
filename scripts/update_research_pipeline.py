@@ -174,11 +174,11 @@ def main(argv: list[str] | None = None) -> int:
             def finish_stage(self, stage_id, code, error=None):
                 finish_stage(self.db, stage_id, exit_code=code, error=error)
                 self.current_stage_id = None
-            def finish(self, code, error=None):
+            def finish(self, code, error=None, status=None):
                 if self.current_stage_id is not None:
                     finish_stage(self.db, self.current_stage_id, exit_code=code or 1, error=error)
                     self.current_stage_id = None
-                finish_run(self.db, self.run.id, exit_code=code, error=error)
+                finish_run(self.db, self.run.id, exit_code=code, error=error, status=status)
                 self.db.close()
 
         tracker = Tracker()
@@ -194,7 +194,8 @@ def main(argv: list[str] | None = None) -> int:
             report = {"status": "already_running", "started_at": timestamp,
                       "finished_at": timestamp, "stages": {}, "error": str(exc)}
         exit_code = 0 if report["status"] == "ok" else 1
-        tracker.finish(exit_code, report.get("error"))
+        persisted_status = "already_running" if report["status"] == "already_running" else None
+        tracker.finish(exit_code, report.get("error"), status=persisted_status)
         log_file = args.log_file.resolve() if args.log_file else None
     except BaseException as exc:
         # Includes interrupts: make a best effort not to strand an execution as running.

@@ -143,7 +143,7 @@ def test_research_routes_are_get_only():
 def test_upcoming_projection_is_prospective_only_and_stored_signal_wins():
     db, historical_id, pending_id, signaled_id = _dashboard_database()
     try:
-        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db)}
+        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db, today=CUTOFF)}
 
         assert historical_id not in rows
         assert rows[pending_id]["m8_status"] == "pending_observation"
@@ -183,7 +183,7 @@ def test_stored_prospective_signal_t5_date_is_authoritative():
             LockupProspectiveSignal.lockup_id == signaled_id))
         signal.observation_date = CUTOFF + timedelta(days=2)
         db.commit()
-        row = next(row for row in get_upcoming_lockups(db)
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
                    if row["lockup_id"] == signaled_id)
         assert row["minus5_observation_date"] == CUTOFF - timedelta(days=1)
         assert row["required_t5_date"] == CUTOFF + timedelta(days=2)
@@ -202,7 +202,7 @@ def test_stored_prospective_required_t5_date_takes_precedence():
         signal.required_observation_date = CUTOFF + timedelta(days=3)
         db.commit()
 
-        row = next(row for row in get_upcoming_lockups(db)
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
                    if row["lockup_id"] == signaled_id)
         assert row["required_t5_date"] == CUTOFF + timedelta(days=3)
         assert row["signal_observation_date"] == CUTOFF + timedelta(days=2)
@@ -222,7 +222,7 @@ def test_lifecycle_unavailable_uses_stored_required_t5_date():
         signal.required_observation_date = CUTOFF - timedelta(days=3)
         db.commit()
 
-        row = next(row for row in get_upcoming_lockups(db)
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
                    if row["lockup_id"] == missed_id)
         assert row["required_t5_date"] == CUTOFF - timedelta(days=3)
         assert row["signal_observation_date"] == CUTOFF
@@ -242,7 +242,7 @@ def test_shadow_signal_wins_over_lifecycle_and_supplies_frozen_features_without_
         _add_signal_mode(db, lockup_id, "shadow_prospective")
         db.commit()
 
-        row = next(row for row in get_upcoming_lockups(db)
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
                    if row["lockup_id"] == lockup_id)
         assert row["m8_status"] == "awaiting_event"
         assert row["evaluation_mode"] == "shadow_prospective"
@@ -268,7 +268,7 @@ def test_strict_signal_wins_when_all_signal_modes_coexist():
                          group="high_high", status="awaiting_outcome")
         db.commit()
 
-        row = next(row for row in get_upcoming_lockups(db)
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
                    if row["lockup_id"] == lockup_id)
         assert row["evaluation_mode"] == "strict_prospective"
         assert row["prospective_track"] == "strict"
@@ -288,7 +288,7 @@ def test_summary_keeps_strict_and_shadow_counts_separate_with_legacy_as_strict()
         _add_signal_mode(db, shadow_only_id, "shadow_prospective")
         db.commit()
 
-        summary = get_research_summary(db)
+        summary = get_research_summary(db, today=CUTOFF)
         assert summary["prospective_signals"] == 1  # legacy ``prospective`` only
         assert summary["shadow_signals"] == 2
         assert summary["awaiting_event"] == 1
@@ -359,7 +359,8 @@ def test_upcoming_projects_only_stored_mature_outcome_and_provenance():
         signal.signal_status = "awaiting_outcome"
         signal.realized_outcome_value = -.99  # defensive: partial/stale is hidden
         db.commit()
-        row = next(r for r in get_upcoming_lockups(db) if r["lockup_id"] == signaled_id)
+        row = next(r for r in get_upcoming_lockups(db, today=CUTOFF)
+                   if r["lockup_id"] == signaled_id)
         assert row["outcome_status"] == "awaiting_outcome"
         assert row["post_event_20d_return"] is None
         assert row["result"] is None
@@ -371,7 +372,8 @@ def test_upcoming_projects_only_stored_mature_outcome_and_provenance():
         signal.realized_outcome_value = -.1234
         signal.outcome_observation_date = date(2026, 9, 28)
         db.commit()
-        row = next(r for r in get_upcoming_lockups(db) if r["lockup_id"] == signaled_id)
+        row = next(r for r in get_upcoming_lockups(db, today=CUTOFF)
+                   if r["lockup_id"] == signaled_id)
         assert row["realized_outcome_name"] == "post_20d_return"
         assert row["post_event_20d_return"] == -.1234
         assert row["outcome_observation_date"] == date(2026, 9, 28)
@@ -388,13 +390,13 @@ def test_dashboard_separates_missed_t5_window_from_waiting_and_history():
             "unavailable", "observation_before_prospective_start")
         db.commit()
 
-        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db)}
+        rows = {row["lockup_id"]: row for row in get_upcoming_lockups(db, today=CUTOFF)}
         assert rows[missed_id]["m8_status"] == "unavailable"
         assert rows[missed_id]["t5_timing_status"] == \
             "observation_before_prospective_start"
         assert rows[pending_id]["m8_status"] == "pending_observation"
         assert historical_id not in rows
-        summary = get_research_summary(db)
+        summary = get_research_summary(db, today=CUTOFF)
         assert summary["missed_t5_window"] == 1
         assert summary["pending_observation"] == 1
         assert summary["historical_unavailable"] == 1
@@ -406,9 +408,9 @@ def test_dashboard_separates_missed_t5_window_from_waiting_and_history():
 def test_summary_counts_clean_cohort_separately_from_filtered_upcoming_rows():
     db, historical_id, pending_id, signaled_id = _dashboard_database()
     try:
-        assert {row["lockup_id"] for row in get_upcoming_lockups(db)} == {
+        assert {row["lockup_id"] for row in get_upcoming_lockups(db, today=CUTOFF)} == {
             pending_id, signaled_id}
-        summary = get_research_summary(db)
+        summary = get_research_summary(db, today=CUTOFF)
         assert summary["eligible_lockups"] == 3
         assert summary["historical_unavailable"] == 1
         assert summary["pending_observation"] == 1
@@ -459,7 +461,7 @@ def test_summary_historical_count_is_computed_from_frozen_state_not_upcoming(mon
                             lambda db: (_ for _ in ()).throw(AssertionError(
                                 "summary must classify the cohort explicitly")))
 
-        summary = get_research_summary(db)
+        summary = get_research_summary(db, today=CUTOFF)
 
         assert summary["historical_unavailable"] == 1
         assert (summary["historical_unavailable"] + summary["missed_t5_window"] +
