@@ -11,6 +11,7 @@ from app.services.research_dashboard import (
     get_prospective_signal_rows, get_research_summary, get_upcoming_lockups,
     hypothesis_metadata,
 )
+from app.services.pipeline_runs import get_pipeline_status
 
 router = APIRouter(prefix="/api")
 
@@ -49,6 +50,11 @@ def research_hypothesis():
 @router.get("/research/summary")
 def research_summary(db: Session = Depends(get_db)):
     return get_research_summary(db)
+
+
+@router.get("/research/pipeline-status")
+def research_pipeline_status(db: Session = Depends(get_db)):
+    return get_pipeline_status(db)
 
 
 @router.get("/research/upcoming-lockups")

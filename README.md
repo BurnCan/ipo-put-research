@@ -86,6 +86,7 @@ The dashboard uses these deterministic, read-only research endpoints:
 
 - `GET /api/research/hypothesis`
 - `GET /api/research/summary`
+- `GET /api/research/pipeline-status` (actual execution/stage provenance and independent market date)
 - `GET /api/research/upcoming-lockups`
 - `GET /api/research/prospective-signals` (optional `status`,
   `interaction_group`, and `ticker` filters)
@@ -158,13 +159,22 @@ Cron supplies a minimal environment, so use absolute paths in the crontab. For a
 `/home/weird/projects/ipo-put-research`, edit the schedule with `crontab -e` and add:
 
 ```cron
-30 18 * * * /home/weird/projects/ipo-put-research/scripts/run_daily_pipeline.sh >> /home/weird/projects/ipo-put-research/logs/cron.log 2>&1
+30 18 * * 1-5 PIPELINE_TRIGGER=cron /home/weird/projects/ipo-put-research/scripts/run_daily_pipeline.sh >> /home/weird/projects/ipo-put-research/logs/cron.log 2>&1
 ```
 
-The five schedule fields are `minute hour day-of-month month day-of-week`; therefore
-`30 18 * * *` means every day at 18:30 in the cron daemon's **local timezone**. Running after the
+The five schedule fields are `minute hour day-of-month month day-of-week`; therefore this runs
+Monday-Friday at 18:30 in the cron daemon's **local timezone**. `PIPELINE_TRIGGER=cron` records
+explicit trigger provenance; direct wrapper invocations default to `manual`. Running after the
 US market close, such as 6:30 PM Eastern when the cron environment is configured for Eastern time,
 is recommended. The Python command does not impose a timezone.
+
+Each invocation now stores its actual UTC start/finish, host, result, and the real
+`market_history`, `m6_analysis`, and `m8_prospective` stage results. The dashboard's **Last pipeline
+run** is this execution provenance; **Latest market date** remains the independent
+`MAX(DailyPrice.trade_date)`. A successful holiday run need not advance that date. Runs before this
+feature was deployed are intentionally not reconstructed, so a new deployment initially reports
+"No recorded runs yet." Database provenance supplements, rather than replaces, the cron and daily
+pipeline logs.
 
 Verify and troubleshoot without changing pipeline data:
 
