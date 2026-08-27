@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from app.models import DailyPrice, PipelineRun, PipelineStageRun
 
 PIPELINE_NAME = "daily_pipeline"
+TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "already_running"})
 
 
 def now_utc() -> datetime:
@@ -44,11 +45,15 @@ def finish_stage(db, stage_id: int, *, exit_code: int, error: object | None = No
     db.commit()
 
 
-def finish_run(db, run_id: int, *, exit_code: int, error: object | None = None):
+def finish_run(db, run_id: int, *, exit_code: int, error: object | None = None,
+               status: str | None = None):
+    """Finish a run, optionally preserving a more specific terminal outcome."""
+    if status is not None and status not in TERMINAL_RUN_STATUSES:
+        raise ValueError(f"invalid terminal pipeline run status: {status}")
     run = db.get(PipelineRun, run_id)
     run.finished_at = now_utc()
     run.exit_code = exit_code
-    run.status = "succeeded" if exit_code == 0 else "failed"
+    run.status = status or ("succeeded" if exit_code == 0 else "failed")
     run.error_summary = concise_error(error)
     stages = db.scalars(select(PipelineStageRun).where(
         PipelineStageRun.pipeline_run_id == run_id)).all()

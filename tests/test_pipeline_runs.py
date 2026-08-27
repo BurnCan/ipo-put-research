@@ -48,6 +48,24 @@ def test_failed_stage_and_run_preserve_previous_success():
     assert status["last_successful_run"]["id"] == prior.id
 
 
+def test_already_running_is_latest_without_replacing_previous_success():
+    _engine, db = database()
+    prior = start_run(db); finish_run(db, prior.id, exit_code=0)
+    blocked = start_run(db, stages_total=3)
+    finish_run(db, blocked.id, exit_code=1, status="already_running",
+               error="pipeline lock is already held")
+
+    status = get_pipeline_status(db)
+    db.refresh(blocked)
+    assert status["last_run"]["id"] == blocked.id
+    assert status["last_run"]["status"] == "already_running"
+    assert status["last_successful_run"]["id"] == prior.id
+    assert blocked.finished_at is not None
+    assert blocked.stages_failed == 0
+    assert db.scalars(select(PipelineStageRun).where(
+        PipelineStageRun.pipeline_run_id == blocked.id)).all() == []
+
+
 def test_distinct_same_day_runs_and_latest_actual_execution():
     _engine, db = database()
     first = start_run(db); finish_run(db, first.id, exit_code=0)
