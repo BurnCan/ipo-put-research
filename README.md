@@ -1280,3 +1280,29 @@ Run v2 deliberately with `python scripts/analyze_lockup_events.py
 --snapshot-version 2`; omitting the option continues to produce v1. This first
 v2 implementation does **not** migrate M7, M8, event outcomes, market-data
 backfill, or the daily pipeline.
+
+## M6 v1-v2 historical parity audit
+
+Compare existing persisted M6 v1 evidence with parallel canonical XNYS v2
+snapshots and emit a bounded, machine-readable JSON report:
+
+```bash
+python scripts/audit_m6_v1_v2.py
+python scripts/audit_m6_v1_v2.py --primary-lockup-only
+python scripts/audit_m6_v1_v2.py --ticker NBRG
+python scripts/audit_m6_v1_v2.py --ticker SBXE --max-examples 10
+```
+
+The command is fully read-only: it does not compute missing snapshots, fetch or
+backfill prices, or mutate M6 v1, M7, M8, outcomes, pipelines, or dashboard
+state. Filters include `--ipo-id`, `--lockup-id`, `--ticker`, and `--limit`.
+Numeric parity uses documented absolute and relative tolerances, configurable
+with `--atol` and `--rtol`.
+
+Identity parity and feature parity are separate results. A partial or
+unavailable v2 row indicates absent canonical prerequisites, not unexplained
+model divergence. In contrast, a feature mismatch with matching identity and a
+`complete` canonical row is reported as
+`numeric_feature_mismatch_complete_history` and requires investigation. The M7
+section is a hypothetical comparison against the frozen feature thresholds; it
+never recomputes or persists group assignments.
