@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
-from app.models import (Company, Filing, IPO, IPOLockup, LockupProspectiveSignal,
-                        LockupSignalSnapshot, Security)
+from app.models import (Company, DailyPrice, Filing, IPO, IPOLockup,
+                        LockupProspectiveSignal, LockupSignalSnapshot, Security)
+from app.services.market_calendar import session_offset, sessions_in_range
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
 from app.services.research_dashboard import (HYPOTHESIS_ID, classify_prospective_result,
@@ -126,6 +127,55 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "Ingest last 365 days" not in page
     assert "window.location='/api/ipos/" not in page
     assert "v??'—'" in page  # the escaping helper has an explicit null fallback
+    assert "T-5 signal market data" in page
+    assert "known no-data" in page
+
+
+def test_t5_signal_window_is_21_canonical_sessions_and_independent_of_snapshot_status():
+    db, _historical_id, pending_id, _signaled_id = _dashboard_database()
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot).where(
+            LockupSignalSnapshot.lockup_id == pending_id))
+        snapshot.snapshot_status = "partial"  # broader M6 v2 history can be partial
+        required = sessions_in_range(session_offset(snapshot.observation_date, -20),
+                                     snapshot.observation_date)
+        for day in required:
+            db.add(DailyPrice(security_id=snapshot.security_id, trade_date=day,
+                              provider="fixture", provider_symbol="T1", open=10,
+                              high=10, low=10, close=10, volume=1))
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
+                   if row["lockup_id"] == pending_id)
+        assert len(required) == 21
+        assert row["market_data_20d"]["required_count"] == 21
+        assert row["market_data_20d"]["status"] == "complete"
+        assert snapshot.snapshot_status == "partial"
+    finally:
+        db.close()
+
+
+def test_t5_diagnostic_uses_event_derived_session_without_rewriting_lifecycle_date():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        # This historical lifecycle identity is intentionally a Saturday.
+        signal.required_observation_date = date(2026, 8, 22)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
+                   if row["lockup_id"] == signaled_id)
+        canonical_end = date(2026, 8, 24)
+        required = row["market_data_20d"]["required_sessions"]
+
+        assert row["required_t5_date"] == date(2026, 8, 22)
+        assert len(required) == 21
+        assert required == list(sessions_in_range(
+            session_offset(canonical_end, -20), canonical_end))
+        assert required[-1] == canonical_end
+    finally:
+        db.close()
 
 
 def test_research_routes_are_get_only():
