@@ -250,8 +250,13 @@ def get_upcoming_lockups(db, *, today=None):
     for row in result:
         if row["security_id"] is None:
             continue
-        end = row["required_t5_date"]
-        required = sessions_in_range(session_offset(end, -20), end)
+        # The diagnostic has a canonical market-session identity of its own.
+        # Lifecycle fields can preserve historical calendar dates (including
+        # non-sessions), so they must not define the signal coverage window.
+        observation_session = resolve_observation_session(
+            row["lockup_event_date"], spec.observation_offset).observation_session
+        required = sessions_in_range(
+            session_offset(observation_session, -20), observation_session)
         requests.append(DiagnosticRequest(row["lockup_id"], row["security_id"], required))
     diagnostics = diagnose_market_data_windows(
         db, requests, provider=settings.market_data_provider, as_of=today)
