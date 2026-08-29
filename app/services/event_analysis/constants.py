@@ -1,4 +1,7 @@
 SNAPSHOT_OFFSETS = (-60, -40, -20, -10, -5, -1)
 OUTCOME_OFFSETS = (0, 1, 5, 10, 20, 40)
-SNAPSHOT_VERSION = "1"
+SNAPSHOT_VERSION_V1 = "1"
+SNAPSHOT_VERSION_V2 = "2"
+# Compatibility default: M7, M8, and all existing callers remain on v1.
+SNAPSHOT_VERSION = SNAPSHOT_VERSION_V1
 OUTCOME_VERSION = "1"

@@ -26,6 +26,10 @@ def main():
         help="Require a selected primary lockup and stored primary expiration date",
     )
     parser.add_argument("--recompute", action="store_true")
+    parser.add_argument(
+        "--snapshot-version", choices=("1", "2"), default="1",
+        help="M6 snapshot lineage (default: historical stored-bar v1)",
+    )
     args = parser.parse_args()
     with SessionLocal() as db:
         report = recompute_lockup_analyses(db, **vars(args))

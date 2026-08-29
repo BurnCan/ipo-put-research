@@ -5,9 +5,12 @@ from sqlalchemy import select
 
 from app.models import (Company, DailyPrice, IPO, IPOLockup, LockupEventAnalysis,
                         LockupSignalSnapshot, Security)
-from .constants import OUTCOME_VERSION, SNAPSHOT_OFFSETS, SNAPSHOT_VERSION
+from app.services.market_calendar import resolve_observation_session
+from .constants import (OUTCOME_VERSION, SNAPSHOT_OFFSETS, SNAPSHOT_VERSION,
+                        SNAPSHOT_VERSION_V1, SNAPSHOT_VERSION_V2)
 from .lockup_outcomes import compute_event_outcome
-from .lockup_snapshots import compute_snapshot, get_price_history_as_of
+from .lockup_snapshots import (compute_canonical_snapshot, compute_snapshot,
+                               get_price_history_as_of)
 from .sessions import (align_event_trade_date, event_date_with_source,
                        get_trading_session_offset)
 
@@ -38,7 +41,9 @@ def _assign(row, values):
 
 
 def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None = None,
-                              *, report: AnalysisReport | None = None):
+                              *, report: AnalysisReport | None = None,
+                              snapshot_version: str = SNAPSHOT_VERSION,
+                              as_of_date: date | None = None):
     report = report or AnalysisReport()
     ipo = db.get(IPO, lockup.ipo_id)
     event_date, source = event_date_with_source(lockup)
@@ -52,9 +57,37 @@ def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None =
         return report
     bars = list(db.scalars(select(DailyPrice).where(DailyPrice.security_id == security.id)
                            .order_by(DailyPrice.trade_date)))
-    if not bars:
+    if not bars and snapshot_version == SNAPSHOT_VERSION_V1:
         report.no_market_history += 1
         return report
+    if snapshot_version == SNAPSHOT_VERSION_V2:
+        bars_by_date = {bar.trade_date: bar for bar in bars}
+        market_data_as_of = as_of_date or (bars[-1].trade_date if bars else date.min)
+        for offset in SNAPSHOT_OFFSETS:
+            resolution = resolve_observation_session(event_date, offset)
+            values = compute_canonical_snapshot(
+                bars_by_date, ipo, lockup, observation_offset=offset,
+                event_date=event_date, event_date_source=source, resolution=resolution,
+                as_of_date=market_data_as_of)
+            values.update(ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id,
+                          snapshot_version=SNAPSHOT_VERSION_V2)
+            row = db.scalar(select(LockupSignalSnapshot).where(
+                LockupSignalSnapshot.lockup_id == lockup.id,
+                LockupSignalSnapshot.security_id == security.id,
+                LockupSignalSnapshot.observation_offset == offset,
+                LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION_V2))
+            if row is None:
+                row = LockupSignalSnapshot(); db.add(row); report.snapshots_created += 1
+            else:
+                report.snapshots_updated += 1
+            _assign(row, values)
+        report.events_aligned += 1
+        if not bars:
+            report.no_market_history += 1
+        db.commit()
+        return report
+    if snapshot_version != SNAPSHOT_VERSION_V1:
+        raise ValueError(f"unsupported snapshot version: {snapshot_version}")
     event_trade_date = align_event_trade_date(bars, event_date)
     report.events_aligned += int(event_trade_date is not None)
     if event_trade_date is None:
@@ -113,7 +146,7 @@ def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None =
 def recompute_lockup_analyses(db, *, limit=None, ipo_id=None, lockup_id=None, ticker=None,
                               classification_status=None, candidate_type=None,
                               offering_status=None, primary_lockup_only=False,
-                              recompute=False):
+                              recompute=False, snapshot_version=SNAPSHOT_VERSION):
     """Analyze stored data only.
 
     An explicit ``lockup_id`` overrides both primary-lockup selection and research-universe
@@ -147,7 +180,8 @@ def recompute_lockup_analyses(db, *, limit=None, ipo_id=None, lockup_id=None, ti
     report.lockups_seen = len(rows)
     for lockup, _ in rows:
         try:
-            recompute_lockup_analysis(db, lockup, report=report)
+            recompute_lockup_analysis(db, lockup, report=report,
+                                      snapshot_version=snapshot_version)
         except Exception:
             db.rollback(); report.errors += 1
     return report

@@ -1263,3 +1263,20 @@ created.  These concepts remain independent: a stored bar does not imply an M6
 snapshot, and an M6 snapshot does not imply M8 prospective eligibility.  This
 layer neither materializes nor rewrites snapshots; historical M6 v1 and all M7
 and M8 evidence remain frozen.
+
+## M6 snapshot lineages
+
+M6 v1 remains the default and retains its historical stored-`DailyPrice`-row
+session sequence. It is preserved because the frozen M7 hypothesis was derived
+from that evidence. M6 v2 is an explicitly selected parallel lineage: XNYS
+determines the first session on/after the lockup date and every observation
+offset, while stored rows determine only data availability. Each feature uses
+its exact canonical window; a missing session produces a null feature rather
+than substituting another bar. V2 rows record calendar provenance and an
+explicit `complete`, `partial`, or `unavailable` status and stable missing-data
+reason.
+
+Run v2 deliberately with `python scripts/analyze_lockup_events.py
+--snapshot-version 2`; omitting the option continues to produce v1. This first
+v2 implementation does **not** migrate M7, M8, event outcomes, market-data
+backfill, or the daily pipeline.
