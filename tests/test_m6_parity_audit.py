@@ -78,6 +78,7 @@ def test_sparse_history_null_feature_is_explained():
         pair = _pair(v1, v2, "TEST", atol=1e-9, rtol=1e-7)
         assert pair.classification == "sparse_history_feature_mismatch"
         assert not pair.feature_matches["return_20d"]
+        assert pair.feature_classifications["return_20d"] == "v1_value_v2_null_incomplete_history"
     finally:
         db.close()
 
@@ -141,6 +142,7 @@ def test_feature_report_covers_every_persisted_audited_feature_and_caps_examples
         report = summarize_m6_parity(db, [pair], max_examples=0)
         assert set(report["feature_parity"]) == set(AUDITED_FEATURES)
         assert report["feature_parity"]["close"]["mismatched"] == 1
+        assert report["feature_parity"]["close"]["numeric_mismatch_complete_history"] == 1
         assert report["mismatch_examples"] == []
         assert report["unexplained_complete_history_mismatches"] == 1
     finally:
@@ -169,6 +171,55 @@ def test_m7_hypothetical_comparison_is_read_only_and_reports_crossing_and_sparse
         sparse = _pair(v1, v2, "TEST", atol=1e-9, rtol=1e-7)
         sparse_report = summarize_m6_parity(db, [sparse])["m7_frozen_hypothesis"]
         assert sparse_report["features"]["return_20d"]["differs_missing_canonical_data"] == 1
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_feature_states_separate_both_null_and_complete_mismatch():
+    db, _, _ = _database()
+    try:
+        v1, v2 = _rows(db)
+        v1.avg_dollar_volume_20d = v2.avg_dollar_volume_20d = None
+        v2.close = float(v1.close) + 1
+        pair = _pair(v1, v2, "TEST", atol=1e-9, rtol=1e-7)
+        assert pair.feature_classifications["avg_dollar_volume_20d"] == "both_null"
+        assert pair.feature_classifications["close"] == "numeric_mismatch_complete_history"
+        assert pair.classification == "numeric_feature_mismatch_complete_history"
+        parity = summarize_m6_parity(db, [pair])["feature_parity"]
+        assert parity["avg_dollar_volume_20d"]["both_null"] == 1
+        assert parity["avg_dollar_volume_20d"]["matched"] == 0
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_partial_range_mismatch_is_not_overlabelled_complete():
+    db, _, _ = _database()
+    try:
+        v1, v2 = _rows(db)
+        v2.post_ipo_high_to_date = float(v1.post_ipo_high_to_date) + 1
+        v2.snapshot_status = "partial"
+        v2.unavailable_reason = "missing_feature_history"
+        pair = _pair(v1, v2, "TEST", atol=1e-9, rtol=1e-7)
+        assert pair.feature_classifications["post_ipo_high_to_date"] == "numeric_mismatch_other"
+        assert pair.classification == "sparse_history_feature_mismatch"
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_m7_uses_frozen_discovery_cutoff_not_superficial_eligibility():
+    db, _, _ = _database()
+    try:
+        v1, v2 = _rows(db)
+        assert v1.return_20d is not None and v1.realized_vol_20d is not None
+        # The row still has the right offset, features, and persisted +20 outcome,
+        # but an observation after the hypothesis freeze was never an M7 member.
+        v1.observation_date = date(2026, 8, 24)
+        pair = _pair(v1, v2, "TEST", atol=1e-9, rtol=1e-7)
+        report = summarize_m6_parity(db, [pair])["m7_frozen_hypothesis"]
+        assert report["m7_rows_seen"] == 0
     finally:
         db.rollback()
         db.close()

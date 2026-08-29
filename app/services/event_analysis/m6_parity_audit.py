@@ -9,10 +9,10 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.models import (Company, IPO, IPOLockup, LockupEventAnalysis,
-                        LockupSignalSnapshot)
+from app.models import Company, IPO, IPOLockup, LockupSignalSnapshot
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
-from .constants import OUTCOME_VERSION, SNAPSHOT_VERSION_V1, SNAPSHOT_VERSION_V2
+from app.services.backtest.dataset import build_backtest_dataset
+from .constants import SNAPSHOT_VERSION_V1, SNAPSHOT_VERSION_V2
 
 DEFAULT_ATOL = 1e-9
 DEFAULT_RTOL = 1e-7
@@ -80,10 +80,48 @@ class PairAudit:
     exact_identity_match: bool | None
     classification: str
     feature_matches: dict[str, bool]
+    feature_classifications: dict[str, str]
     feature_values: dict[str, dict[str, Any]]
 
     def to_dict(self):
         return asdict(self)
+
+
+_POST_IPO_RANGE_FEATURES = frozenset({
+    "post_ipo_high_to_date", "post_ipo_low_to_date",
+    "drawdown_from_post_ipo_high", "position_in_post_ipo_range",
+    "ipo_gain_retention",
+})
+
+
+def _feature_history_complete(name, v2):
+    """Conservatively establish completeness of this feature's prerequisites.
+
+    A non-null canonical fixed-window value can only be produced from its exact
+    window.  The schema does not retain post-IPO completeness separately, so
+    range-derived fields require the stronger whole-snapshot completeness flag.
+    This deliberately avoids over-labelling range mismatches on partial rows.
+    """
+    if name in _POST_IPO_RANGE_FEATURES:
+        return v2.snapshot_status == "complete"
+    return getattr(v2, name) is not None
+
+
+def _feature_classification(name, v1, v2, *, identity_match, atol, rtol):
+    a, b = getattr(v1, name), getattr(v2, name)
+    if a is None and b is None:
+        return "both_null"
+    if a is None:
+        return "v1_null_v2_value"
+    if b is None:
+        return ("v1_value_v2_null_incomplete_history"
+                if not _feature_history_complete(name, v2)
+                else "v1_value_v2_null")
+    if numeric_match(a, b, atol=atol, rtol=rtol):
+        return "match"
+    if identity_match and _feature_history_complete(name, v2):
+        return "numeric_mismatch_complete_history"
+    return "numeric_mismatch_other"
 
 
 def _pair(v1, v2, ticker, *, atol, rtol):
@@ -100,6 +138,7 @@ def _pair(v1, v2, ticker, *, atol, rtol):
         identity_match = observation_match and event_match
         classification = ""  # assigned after feature comparison
     matches = {}
+    feature_classifications = {}
     values = {name: {"v1": _scalar(getattr(v1, name)) if v1 else None,
                      "v2": _scalar(getattr(v2, name)) if v2 else None}
               for name in AUDITED_FEATURES}
@@ -107,20 +146,22 @@ def _pair(v1, v2, ticker, *, atol, rtol):
         for name in AUDITED_FEATURES:
             a, b = getattr(v1, name), getattr(v2, name)
             matches[name] = numeric_match(a, b, atol=atol, rtol=rtol)
-        any_mismatch = not all(matches.values())
+            feature_classifications[name] = _feature_classification(
+                name, v1, v2, identity_match=identity_match, atol=atol, rtol=rtol)
+        states = set(feature_classifications.values())
+        any_mismatch = bool(states - {"match", "both_null"})
         if not observation_match:
             classification = "observation_session_mismatch"
         elif not event_match:
             classification = "event_session_mismatch"
         elif v2.unavailable_reason in UNAVAILABLE_CLASSIFICATIONS:
             classification = UNAVAILABLE_CLASSIFICATIONS[v2.unavailable_reason]
-        elif v2.snapshot_status == "partial" and v2.unavailable_reason == "missing_feature_history":
-            classification = ("sparse_history_feature_mismatch" if any_mismatch
-                              else "v2_partial_missing_feature_history")
-        elif any_mismatch and v2.snapshot_status == "complete":
+        elif "numeric_mismatch_complete_history" in states:
             classification = "numeric_feature_mismatch_complete_history"
         elif any_mismatch:
             classification = "sparse_history_feature_mismatch"
+        elif v2.snapshot_status == "partial" and v2.unavailable_reason == "missing_feature_history":
+            classification = "v2_partial_missing_feature_history"
         else:
             classification = "exact_match"
     return PairAudit(
@@ -132,19 +173,28 @@ def _pair(v1, v2, ticker, *, atol, rtol):
         v2.calendar_provider if v2 else None, v2.calendar_version if v2 else None,
         v2.expected_history_sessions if v2 else None,
         v2.missing_history_sessions if v2 else None, observation_match, event_match,
-        identity_match, classification, matches, values)
+        identity_match, classification, matches, feature_classifications, values)
 
 
 def _m7_summary(db, pairs):
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
-    outcome_keys = set(db.execute(select(
-        LockupEventAnalysis.lockup_id, LockupEventAnalysis.security_id).where(
-            LockupEventAnalysis.outcome_version == OUTCOME_VERSION,
-            LockupEventAnalysis.post_20d_return.is_not(None))).all())
+    # No separate M7-membership table exists.  Re-run the original, frozen M7
+    # service's exact dataset/cutoff/deduplication constraints without writing
+    # or recomputing snapshots, outcomes, or membership.
+    discovery = [r for r in build_backtest_dataset(db)
+                 if r.get("observation_date") is not None and
+                 r["observation_date"] <= spec.prospective_start_date and
+                 r.get("observation_offset") == spec.observation_offset]
+    unique = {}
+    for row in discovery:
+        unique.setdefault(row["lockup_id"], row)
+    member_keys = {(r["lockup_id"], r["security_id"])
+                   for r in unique.values()
+                   if r.get(spec.feature1) is not None and
+                   r.get(spec.feature2) is not None and
+                   r.get(spec.outcome) is not None}
     rows = [p for p in pairs if p.observation_offset == spec.observation_offset and
-            (p.lockup_id, p.security_id) in outcome_keys and
-            all(p.feature_values.get(name, {}).get("v1") is not None
-                for name in (spec.feature1, spec.feature2))]
+            (p.lockup_id, p.security_id) in member_keys]
     statuses = Counter(p.v2_snapshot_status for p in rows)
     feature_results = {}
     crossings = []
@@ -153,12 +203,13 @@ def _m7_summary(db, pairs):
         counts = Counter()
         for p in rows:
             vals = p.feature_values.get(name, {})
-            if p.feature_matches.get(name):
+            state = p.feature_classifications.get(name)
+            if state in ("match", "both_null"):
                 counts["matches_v1"] += 1
-            elif p.v2_snapshot_status != "complete" or vals.get("v2") is None:
-                counts["differs_missing_canonical_data"] += 1
-            else:
+            elif state == "numeric_mismatch_complete_history":
                 counts["differs_complete_canonical_data"] += 1
+            else:
+                counts["differs_missing_canonical_data"] += 1
             if vals.get("v1") is not None and vals.get("v2") is not None and threshold is not None:
                 v1_side = "low" if vals["v1"] <= threshold else "high"
                 v2_side = "low" if vals["v2"] <= threshold else "high"
@@ -201,10 +252,17 @@ def summarize_m6_parity(db, pairs, *, max_examples=25, atol=DEFAULT_ATOL,
             history["missing_history_sessions"] += p.missing_history_sessions or 0
         for name, matched in p.feature_matches.items():
             c = features[name]; c["compared"] += 1
-            c["matched" if matched else "mismatched"] += 1
             vals = p.feature_values[name]
+            state = p.feature_classifications[name]
+            if state == "match": c["matched"] += 1
+            elif state != "both_null": c["mismatched"] += 1
+            if state == "both_null": c["both_null"] += 1
             if vals["v1"] is None and vals["v2"] is not None: c["v1_null_v2_value"] += 1
             if vals["v1"] is not None and vals["v2"] is None: c["v1_value_v2_null"] += 1
+            if state == "numeric_mismatch_complete_history":
+                c["numeric_mismatch_complete_history"] += 1
+            if state in ("v1_value_v2_null_incomplete_history", "numeric_mismatch_other"):
+                c["incomplete_history_mismatch"] += 1
     result = {
         "audit": "m6_v1_v2_canonical_parity", "read_only": True,
         "numeric_tolerance": {"atol": atol, "rtol": rtol,
@@ -225,7 +283,9 @@ def summarize_m6_parity(db, pairs, *, max_examples=25, atol=DEFAULT_ATOL,
         "classifications": {key: classifications[key] for key in CLASSIFICATIONS},
         "feature_parity": {name: {key: counts[key] for key in
                                    ("compared", "matched", "mismatched",
-                                    "v1_null_v2_value", "v1_value_v2_null")}
+                                    "both_null", "v1_null_v2_value", "v1_value_v2_null",
+                                    "numeric_mismatch_complete_history",
+                                    "incomplete_history_mismatch")}
                            for name, counts in features.items()},
         "v2_completeness": {"by_status": {key: statuses[key] for key in
                                              ("complete", "partial", "unavailable")},
