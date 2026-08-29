@@ -49,7 +49,17 @@ def upgrade_milestone_3(engine: Engine) -> list[str]:
 def upgrade_schema(engine: Engine) -> list[str]:
     return (upgrade_milestone_2(engine) + upgrade_milestone_3(engine) + upgrade_milestone_4(engine)
             + upgrade_milestone_5(engine) + upgrade_milestone_6(engine) + upgrade_milestone_8(engine)
-            + upgrade_pipeline_runs(engine))
+            + upgrade_pipeline_runs(engine) + upgrade_market_data_backfill_attempts(engine))
+
+
+def upgrade_market_data_backfill_attempts(engine: Engine) -> list[str]:
+    """Add request provenance without inferring any historical attempts."""
+    from app.models import MarketDataBackfillAttempt
+    table = MarketDataBackfillAttempt.__table__
+    if table.name in set(inspect(engine).get_table_names()):
+        return []
+    table.create(engine, checkfirst=True)
+    return [table.name]
 
 
 def upgrade_pipeline_runs(engine: Engine) -> list[str]:
