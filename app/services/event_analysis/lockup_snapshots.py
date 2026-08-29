@@ -5,8 +5,8 @@ from datetime import date
 from sqlalchemy import select
 
 from app.models import DailyPrice
-from app.services.market_calendar import (SessionResolution, session_offset,
-                                          sessions_in_range)
+from app.services.market_calendar import (SessionResolution, is_session,
+                                          session_offset, sessions_in_range)
 
 
 def get_price_history_as_of(db, security_id: int, cutoff_date: date):
@@ -174,7 +174,7 @@ def compute_canonical_snapshot(bars_by_date, ipo, lockup, *, observation_offset,
                     if day <= observation]
     close = float(current.close)
     first_trade = stored_as_of[0][0]
-    first_trade_is_session = sessions_in_range(first_trade, first_trade) == [first_trade]
+    first_trade_is_session = is_session(first_trade)
     post_ipo_sessions = (sessions_in_range(first_trade, observation)
                          if first_trade_is_session else [])
     post_ipo_complete = (first_trade_is_session and
