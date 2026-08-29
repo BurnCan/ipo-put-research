@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
-from app.models import Company, DailyPrice, IPO, IPOLockup, Security
+from app.models import (Company, DailyPrice, IPO, IPOLockup,
+                        MarketDataBackfillAttempt, Security)
 from app.services.market_calendar import session_offset, sessions_in_range
 from app.services.market_data.base import DailyBar
 from app.services.market_data.coverage import (
@@ -97,6 +98,65 @@ def test_provider_error_preserves_canonical_gap():
                                        date(2025, 1, 6), date(2025, 1, 6))
     assert result.status == 'provider_error'
     assert result.coverage_after.missing_sessions == (date(2025, 1, 6),)
+    attempt = db.scalar(select(MarketDataBackfillAttempt))
+    assert attempt.status == 'error'
+    assert attempt.error_message == 'offline fixture failure'
+
+
+def test_attempt_statuses_dry_run_and_no_data_retry_suppression():
+    db, security, _ = fixture()
+    days = sessions_in_range(date(2025, 1, 6), date(2025, 1, 8))
+    dry = backfill_missing_sessions(db, Provider(), security, days[0], days[-1],
+                                    dry_run=True)
+    assert dry.attempt_records_created == 0
+    assert db.query(MarketDataBackfillAttempt).count() == 0
+
+    empty_provider = Provider()
+    first = backfill_missing_sessions(db, empty_provider, security, days[0], days[-1])
+    assert first.attempt_records_created == 1
+    assert db.scalar(select(MarketDataBackfillAttempt)).status == 'no_data'
+    second = backfill_missing_sessions(db, empty_provider, security, days[0], days[-1])
+    assert second.status == 'known_no_data'
+    assert second.provider_requests == 0
+    retried = backfill_missing_sessions(db, empty_provider, security, days[0], days[-1],
+                                        retry_known_no_data=True)
+    assert retried.provider_requests == 1
+    assert db.query(MarketDataBackfillAttempt).count() == 2
+
+
+def test_success_attempt_and_partial_overlap_and_provider_identity():
+    db, security, _ = fixture()
+    days = sessions_in_range(date(2025, 1, 6), date(2025, 1, 10))
+    # Only the first two canonical sessions are conclusively known empty.
+    backfill_missing_sessions(db, Provider(), security, days[0], days[1],
+                              as_of_date=days[-1])
+    other = Provider([bar(day) for day in days]); other.name = 'other'
+    result = backfill_missing_sessions(db, other, security, days[0], days[-1],
+                                       as_of_date=days[-1])
+    assert result.request_ranges == ((days[0], days[-1]),)  # provider-specific
+    assert result.bars_created == len(days)
+    assert db.scalars(select(MarketDataBackfillAttempt).where(
+        MarketDataBackfillAttempt.provider == 'other')).one().status == 'success'
+
+    for row in db.scalars(select(DailyPrice)).all(): db.delete(row)
+    db.commit()
+    same = Provider([bar(day) for day in days[2:]])
+    split = backfill_missing_sessions(db, same, security, days[0], days[-1],
+                                      as_of_date=days[-1])
+    assert split.skipped_known_no_data_ranges == ((days[0], days[1]),)
+    assert split.request_ranges == ((days[2], days[-1]),)
+
+
+def test_no_data_is_keyed_by_security_id_not_ticker():
+    db, first, _ = fixture()
+    company = Company(cik='0000000002', name='Other Sparse Co', ticker='SPRS')
+    second = Security(company=company, ticker='SPRS', provider_symbol='SPRS')
+    db.add(second); db.commit()
+    day = date(2025, 1, 6)
+    backfill_missing_sessions(db, Provider(), first, day, day, as_of_date=day)
+    provider = Provider([bar(day)])
+    result = backfill_missing_sessions(db, provider, second, day, day, as_of_date=day)
+    assert result.provider_requests == 1 and result.bars_created == 1
 
 
 def test_canonical_coverage_accepts_another_provider_and_preserves_provenance_view():

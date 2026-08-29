@@ -1257,6 +1257,34 @@ python scripts/backfill_market_data_gaps.py --ticker NBRG \
 Backfill uses the same skip reporting, explicit-range behavior, and task
 deduplication as the read-only audit.
 
+Every executed provider request is also recorded in
+`market_data_backfill_attempts`, independently of `DailyPrice`. Its stable
+`success`, `no_data`, `partial`, and `error` statuses describe what the provider
+request did—not whether canonical coverage is complete. By default, the
+backfill planner subtracts canonical sessions covered by provider-specific
+`no_data` attempts, while still requesting any untouched part of a partially
+overlapping range. Dry runs report both the skipped and actually planned
+ranges. Retry deliberately after a provider correction with:
+
+```bash
+python scripts/backfill_market_data_gaps.py --ticker NBRG \
+  --start-date 2026-07-22 --end-date 2026-07-29 --execute \
+  --retry-known-no-data
+```
+
+Pre-feature attempts are never inferred or seeded by schema upgrades. Record
+an observed historical attempt explicitly (counts remain null rather than
+being fabricated) using a unique ticker or, preferably, durable security ID:
+
+```bash
+python scripts/record_market_data_backfill_attempt.py --security-id 47 \
+  --provider massive --start-date 2026-05-15 --end-date 2026-05-20 \
+  --status no_data
+```
+
+In short: calendar determines identity, market data determines completeness,
+and backfill provenance determines only what has already been attempted.
+
 Future canonical sessions remain visible to planning, but repair requests are
 capped at the current (or injected) as-of date and no placeholder rows are
 created.  These concepts remain independent: a stored bar does not imply an M6

@@ -6,7 +6,8 @@ from importlib.metadata import version
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Company, DailyPrice, IPOLockup, Security, utc_now
+from app.models import (Company, DailyPrice, IPOLockup, MarketDataBackfillAttempt,
+                        Security, utc_now)
 from app.services.event_analysis.constants import SNAPSHOT_OFFSETS
 from app.services.event_analysis.sessions import event_date_with_source
 from app.services.market_calendar import (
@@ -88,6 +89,12 @@ class BackfillResult:
     coverage_before: CoverageResult
     coverage_after: CoverageResult
     request_ranges: tuple[tuple[date, date], ...]
+    planned_request_ranges: tuple[tuple[date, date], ...] = ()
+    skipped_known_no_data_ranges: tuple[tuple[date, date], ...] = ()
+    known_no_data_sessions: int = 0
+    known_no_data_ranges: int = 0
+    provider_requests_skipped_known_no_data: int = 0
+    attempt_records_created: int = 0
     provider_requests: int = 0
     bars_fetched: int = 0
     bars_created: int = 0
@@ -159,37 +166,99 @@ def provider_request_ranges(missing: tuple[date, ...]) -> tuple[tuple[date, date
     return tuple(groups)
 
 
+def known_no_data_sessions(db: Session, security_id: int, provider: str,
+                           sessions: tuple[date, ...]) -> tuple[date, ...]:
+    """Return requested canonical sessions covered by provider-specific no-data attempts."""
+    if not sessions:
+        return ()
+    attempts = db.scalars(select(MarketDataBackfillAttempt).where(
+        MarketDataBackfillAttempt.security_id == security_id,
+        MarketDataBackfillAttempt.provider == provider,
+        MarketDataBackfillAttempt.status == "no_data",
+        MarketDataBackfillAttempt.requested_end_date >= sessions[0],
+        MarketDataBackfillAttempt.requested_start_date <= sessions[-1])).all()
+    return tuple(day for day in sessions if any(
+        row.requested_start_date <= day <= row.requested_end_date for row in attempts))
+
+
+def record_backfill_attempt(db: Session, security: Security, provider: str,
+                            start_date: date, end_date: date, status: str, *,
+                            bars_returned: int | None = None,
+                            bars_created: int | None = None,
+                            bars_updated: int | None = None,
+                            error_message: str | None = None,
+                            commit: bool = True) -> MarketDataBackfillAttempt:
+    """Explicitly record an observed attempt, including legacy/manual provenance."""
+    if status not in {"success", "no_data", "partial", "error"}:
+        raise ValueError("status must be success, no_data, partial, or error")
+    if start_date > end_date:
+        raise ValueError("start date must not be after end date")
+    row = MarketDataBackfillAttempt(
+        security_id=security.id, provider=provider,
+        requested_start_date=start_date, requested_end_date=end_date,
+        attempted_at=utc_now(), status=status, bars_returned=bars_returned,
+        bars_created=bars_created, bars_updated=bars_updated,
+        error_message=error_message)
+    db.add(row)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return row
+
+
 def backfill_missing_sessions(db: Session, provider: MarketDataProvider, security: Security,
                               start_date: date, end_date: date, *, as_of_date: date | None = None,
-                              dry_run: bool = False) -> BackfillResult:
+                              dry_run: bool = False,
+                              retry_known_no_data: bool = False) -> BackfillResult:
     cutoff = as_of_date or date.today()
     # Canonical completeness is provider-independent. Provider identity is
     # provenance only and must not trigger duplicate work after a switch.
     before = coverage(db, security, start_date, end_date, as_of_date=cutoff)
     fetchable = before.fetchable_missing_sessions
-    ranges = provider_request_ranges(fetchable)
-    if not ranges:
+    planned_ranges = provider_request_ranges(fetchable)
+    known = () if retry_known_no_data else known_no_data_sessions(
+        db, security.id, provider.name, fetchable)
+    known_set = set(known)
+    request_sessions = tuple(day for day in fetchable if day not in known_set)
+    ranges = provider_request_ranges(request_sessions)
+    skipped_ranges = provider_request_ranges(known)
+    common = dict(planned_request_ranges=planned_ranges,
+                  skipped_known_no_data_ranges=skipped_ranges,
+                  known_no_data_sessions=len(known), known_no_data_ranges=len(skipped_ranges),
+                  provider_requests_skipped_known_no_data=len(skipped_ranges))
+    if not planned_ranges:
         status = "complete" if before.coverage_complete else "future_sessions_only"
-        return BackfillResult(status, before, before, ranges)
+        return BackfillResult(status, before, before, ranges, **common)
+    if not ranges:
+        return BackfillResult("known_no_data", before, before, ranges, **common)
     symbol = security.provider_symbol or security.ticker
     if not symbol:
-        return BackfillResult("no_security_symbol", before, before, ranges)
+        return BackfillResult("no_security_symbol", before, before, ranges, **common)
     if dry_run:
-        return BackfillResult("missing_sessions", before, before, ranges)
-    result = BackfillResult("missing_sessions", before, before, ranges)
+        return BackfillResult("missing_sessions", before, before, ranges, **common)
+    result = BackfillResult("missing_sessions", before, before, ranges, **common)
     for range_start, range_end in ranges:
         result.provider_requests += 1
         try:
             bars = provider.get_daily_history(symbol, range_start, range_end)
-        except Exception:
+        except Exception as exc:
             result.provider_errors += 1
+            record_backfill_attempt(db, security, provider.name, range_start, range_end,
+                                    "error", bars_returned=0, bars_created=0,
+                                    bars_updated=0, error_message=str(exc), commit=False)
+            result.attempt_records_created += 1
             continue
         result.bars_fetched += len(bars)
         if not bars:
             result.provider_no_data += 1
+        created_before, updated_before = result.bars_created, result.bars_updated
+        requested_days = set(sessions_in_range(range_start, range_end)) & set(request_sessions)
+        returned_days = set()
         for bar in bars:
             if bar.trade_date not in set(fetchable) or not is_session(bar.trade_date):
                 continue
+            returned_days.add(bar.trade_date)
             row = db.scalar(select(DailyPrice).where(
                 DailyPrice.security_id == security.id, DailyPrice.trade_date == bar.trade_date,
                 DailyPrice.provider == provider.name))
@@ -202,7 +271,13 @@ def backfill_missing_sessions(db: Session, provider: MarketDataProvider, securit
             else:
                 for key, value in values.items(): setattr(row, key, value)
                 result.bars_updated += 1
-        db.flush()
+        status = ("no_data" if not bars else
+                  "success" if requested_days <= returned_days else "partial")
+        record_backfill_attempt(
+            db, security, provider.name, range_start, range_end, status,
+            bars_returned=len(bars), bars_created=result.bars_created - created_before,
+            bars_updated=result.bars_updated - updated_before, commit=False)
+        result.attempt_records_created += 1
     db.commit()
     result.coverage_after = coverage(db, security, start_date, end_date, as_of_date=cutoff)
     if result.coverage_after.coverage_complete:

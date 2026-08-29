@@ -100,6 +100,34 @@ class Security(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     company: Mapped[Company] = relationship(back_populates="securities")
     prices: Mapped[list["DailyPrice"]] = relationship(back_populates="security", cascade="all, delete-orphan")
+    backfill_attempts: Mapped[list["MarketDataBackfillAttempt"]] = relationship(
+        back_populates="security", cascade="all, delete-orphan")
+
+
+class MarketDataBackfillAttempt(Base):
+    """One durable provider request; never a statement of canonical coverage."""
+    __tablename__ = "market_data_backfill_attempts"
+    __table_args__ = (
+        CheckConstraint("status IN ('success', 'no_data', 'partial', 'error')",
+                        name="ck_market_data_backfill_attempt_status"),
+        Index("ix_backfill_attempt_lookup", "security_id", "provider",
+              "requested_start_date", "requested_end_date", "status"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    requested_start_date: Mapped[date] = mapped_column(Date)
+    requested_end_date: Mapped[date] = mapped_column(Date)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    # Nullable so explicitly entered legacy provenance need not invent counts.
+    bars_returned: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bars_created: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bars_updated: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    security: Mapped[Security] = relationship(back_populates="backfill_attempts")
 
 
 class DailyPrice(Base):
