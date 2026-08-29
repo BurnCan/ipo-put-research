@@ -155,6 +155,29 @@ def test_t5_signal_window_is_21_canonical_sessions_and_independent_of_snapshot_s
         db.close()
 
 
+def test_t5_diagnostic_uses_event_derived_session_without_rewriting_lifecycle_date():
+    db, _historical_id, _pending_id, signaled_id = _dashboard_database()
+    try:
+        signal = db.scalar(select(LockupProspectiveSignal).where(
+            LockupProspectiveSignal.lockup_id == signaled_id))
+        # This historical lifecycle identity is intentionally a Saturday.
+        signal.required_observation_date = date(2026, 8, 22)
+        db.commit()
+
+        row = next(row for row in get_upcoming_lockups(db, today=CUTOFF)
+                   if row["lockup_id"] == signaled_id)
+        canonical_end = date(2026, 8, 24)
+        required = row["market_data_20d"]["required_sessions"]
+
+        assert row["required_t5_date"] == date(2026, 8, 22)
+        assert len(required) == 21
+        assert required == list(sessions_in_range(
+            session_offset(canonical_end, -20), canonical_end))
+        assert required[-1] == canonical_end
+    finally:
+        db.close()
+
+
 def test_research_routes_are_get_only():
     routes = Path("app/api/routes.py").read_text(encoding="utf-8")
     required_get_routes = {
