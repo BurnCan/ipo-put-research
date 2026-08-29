@@ -42,7 +42,8 @@ def _assign(row, values):
 
 def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None = None,
                               *, report: AnalysisReport | None = None,
-                              snapshot_version: str = SNAPSHOT_VERSION):
+                              snapshot_version: str = SNAPSHOT_VERSION,
+                              as_of_date: date | None = None):
     report = report or AnalysisReport()
     ipo = db.get(IPO, lockup.ipo_id)
     event_date, source = event_date_with_source(lockup)
@@ -61,11 +62,13 @@ def recompute_lockup_analysis(db, lockup: IPOLockup, security: Security | None =
         return report
     if snapshot_version == SNAPSHOT_VERSION_V2:
         bars_by_date = {bar.trade_date: bar for bar in bars}
+        market_data_as_of = as_of_date or (bars[-1].trade_date if bars else date.min)
         for offset in SNAPSHOT_OFFSETS:
             resolution = resolve_observation_session(event_date, offset)
             values = compute_canonical_snapshot(
                 bars_by_date, ipo, lockup, observation_offset=offset,
-                event_date=event_date, event_date_source=source, resolution=resolution)
+                event_date=event_date, event_date_source=source, resolution=resolution,
+                as_of_date=market_data_as_of)
             values.update(ipo_id=ipo.id, lockup_id=lockup.id, security_id=security.id,
                           snapshot_version=SNAPSHOT_VERSION_V2)
             row = db.scalar(select(LockupSignalSnapshot).where(

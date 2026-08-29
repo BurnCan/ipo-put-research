@@ -30,11 +30,12 @@ def canonical_bars(end, count=41):
             for index, day in enumerate(dates)}
 
 
-def calculate(bars):
+def calculate(bars, as_of_date=None):
     resolution, ipo, lockup = inputs()
     return compute_canonical_snapshot(
         bars, ipo, lockup, observation_offset=-5, event_date=resolution.requested_event_date,
-        event_date_source="stated", resolution=resolution)
+        event_date_source="stated", resolution=resolution,
+        as_of_date=as_of_date or resolution.observation_session)
 
 
 def test_non_session_event_and_sparse_rows_do_not_move_observation_identity():
@@ -58,6 +59,20 @@ def test_sparse_stored_rows_cannot_manufacture_twenty_session_features():
     result = calculate(bars)
     assert result["return_20d"] is None
     assert result["realized_vol_20d"] is None
+
+
+def test_sparse_post_ipo_history_uses_canonical_session_age_and_nulls_range_features():
+    resolution, _, _ = inputs()
+    bars = canonical_bars(resolution.observation_session, 21)
+    sessions = sorted(bars)
+    bars.pop(sessions[8])
+    result = calculate(bars)
+    assert result["trading_sessions_since_first_trade"] == 20
+    for name in ("post_ipo_high_to_date", "post_ipo_low_to_date",
+                 "drawdown_from_post_ipo_high", "position_in_post_ipo_range",
+                 "ipo_gain_retention"):
+        assert result[name] is None
+    assert result["snapshot_status"] == "partial"
 
 
 def test_feature_specific_partial_and_complete_snapshots():
@@ -84,6 +99,18 @@ def test_missing_observation_bar_is_explicit_and_never_substituted():
     assert result["snapshot_status"] == "unavailable"
     assert result["unavailable_reason"] == "missing_observation_bar"
     assert result["close"] is None
+
+
+def test_future_and_historical_missing_observations_have_distinct_reasons():
+    resolution, _, _ = inputs()
+    bars = canonical_bars(session_offset(resolution.observation_session, -1), 40)
+    future = calculate(bars, as_of_date=session_offset(resolution.observation_session, -1))
+    assert future["snapshot_status"] == "unavailable"
+    assert future["unavailable_reason"] == "observation_not_reached"
+
+    historical = calculate(bars, as_of_date=resolution.observation_session)
+    assert historical["snapshot_status"] == "unavailable"
+    assert historical["unavailable_reason"] == "missing_observation_bar"
 
 
 def test_v1_v2_coexist_and_v2_is_idempotent():
