@@ -1285,6 +1285,18 @@ python scripts/record_market_data_backfill_attempt.py --security-id 47 \
 In short: calendar determines identity, market data determines completeness,
 and backfill provenance determines only what has already been attempted.
 
+The research dashboard applies that separation to the canonical 21-session
+window ending at T-5 (the observation bar plus the 20 prior sessions used by
+`return_20d` and `realized_vol_20d`). Its compact market-data diagnostic asks
+two different questions: **canonical completeness** means “Do we have every
+required bar?”, across providers; **provider provenance** means “Have we
+already tried to fetch each still-missing session from the configured
+provider?” Missing sessions are shown as not yet reached, unattempted, known
+provider no-data, provider error, or mixed attempt history. Attempt ranges are
+projected only onto XNYS sessions, and the newest overlapping attempt wins.
+These dashboard reads never request data, record attempts, alter snapshots, or
+make attempt provenance stand in for a bar.
+
 Future canonical sessions remain visible to planning, but repair requests are
 capped at the current (or injected) as-of date and no placeholder rows are
 created.  These concepts remain independent: a stored bar does not imply an M6

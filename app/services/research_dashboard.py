@@ -3,13 +3,17 @@ from datetime import date
 
 from sqlalchemy import case, func, select
 
+from app.config import settings
 from app.models import (Company, DailyPrice, IPO, IPOLockup,
-                        LockupProspectiveSignal, LockupSignalSnapshot)
+                        LockupProspectiveSignal, LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import (FROZEN_HYPOTHESES,
                                              analyze_two_feature_interaction)
 from app.services.backtest.dataset import build_backtest_dataset
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
-from app.services.market_calendar import resolve_observation_session
+from app.services.market_calendar import (resolve_observation_session, session_offset,
+                                          sessions_in_range)
+from app.services.market_data.diagnostics import (DiagnosticRequest,
+                                                  diagnose_market_data_windows)
 from app.services.prospective.evaluation import (evaluate_prospective_signals,
                                                   is_bearish_outcome)
 
@@ -129,7 +133,12 @@ def get_upcoming_lockups(db, *, today=None):
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     latest = db.scalar(select(func.max(DailyPrice.trade_date)))
     result = []
-    for lockup, ipo, company in _cohort(db):
+    cohort = _cohort(db)
+    company_ids = {company.id for _, _, company in cohort}
+    security_by_company = {security.company_id: security.id for security in db.scalars(
+        select(Security).where(Security.company_id.in_(company_ids),
+                               Security.is_primary.is_(True)).order_by(Security.id))}
+    for lockup, ipo, company in cohort:
         event_date = lockup.stated_expiration_date or lockup.calculated_expiration_date
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
@@ -171,7 +180,10 @@ def get_upcoming_lockups(db, *, today=None):
                             "t5_snapshot_available" if snapshot else
                             "waiting_for_t5" if required_t5_date > today else
                             "waiting_for_market_data")
+        security_id = (signal.security_id if signal else snapshot.security_id if snapshot else
+                       security_by_company.get(company.id))
         result.append({"ipo_id": ipo.id, "lockup_id": lockup.id,
+            "security_id": security_id,
             "company_name": company.name, "ticker": company.ticker, "ipo_date": ipo.ipo_date,
             "lockup_event_date": event_date,
             "primary_lockup_expiration_date": ipo.primary_lockup_expiration_date,
@@ -234,6 +246,17 @@ def get_upcoming_lockups(db, *, today=None):
             "signal_created_at": signal.created_at if signal else None,
             "signal_locked_at": signal.created_at if signal else None,
             "calendar_days_to_event": (event_date - today).days if event_date else None})
+    requests = []
+    for row in result:
+        if row["security_id"] is None:
+            continue
+        end = row["required_t5_date"]
+        required = sessions_in_range(session_offset(end, -20), end)
+        requests.append(DiagnosticRequest(row["lockup_id"], row["security_id"], required))
+    diagnostics = diagnose_market_data_windows(
+        db, requests, provider=settings.market_data_provider, as_of=today)
+    for row in result:
+        row["market_data_20d"] = diagnostics.get(row["lockup_id"])
     return result
 
 
