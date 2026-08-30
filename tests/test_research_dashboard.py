@@ -16,6 +16,8 @@ from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
 from app.services.research_dashboard import (HYPOTHESIS_ID, classify_prospective_result,
                                                get_research_summary,
+                                               get_t5_dashboard_payload,
+                                               get_t5_readiness,
                                                get_upcoming_lockups,
                                                hypothesis_metadata)
 from app.services import research_dashboard
@@ -128,7 +130,7 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "window.location='/api/ipos/" not in page
     assert "v??'—'" in page  # the escaping helper has an explicit null fallback
     assert "T-5 signal market data" in page
-    assert "known no-data" in page
+    assert "Known no-data sessions" in page
 
 
 def test_hypothesis_explanation_uses_registry_values_and_preserves_evidence_roles():
@@ -155,12 +157,66 @@ def test_market_data_explanation_maps_existing_diagnostic_provenance():
     for label in ("Complete", "Not reached", "Backfill candidate",
                   "Provider exhausted", "Provider error"):
         assert label in page
-    assert "Calendar determines which sessions are required" in page
+    assert "Calendar determines the 21 sessions required" in page
     assert "Missing sessions never redefine the trading-session sequence" in page
-    assert "Provider-exhausted gaps are an evidence-quality constraint" in page
+    assert "it is an evidence-quality constraint, not a pipeline failure" in page
+    assert "readinessLabels[d.readiness]" in page
     assert "d.provider_error_count" in page
-    assert "d.unattempted_missing_count||d.attempted_missing_count" in page
-    assert "d.known_no_data_count===d.missing_count" in page
+    assert "d.unattempted_retryable_count" in page
+    assert "d.future_not_reached_count" in page
+    # Readiness precedence is supplied by Python, not reconstructed in JS.
+    assert "const marketDataState" not in page
+
+
+def test_dashboard_readiness_summary_exposes_window_and_session_counts():
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+
+    assert "/api/research/t5-readiness" in page
+    assert "json('/api/research/upcoming-lockups')" not in page
+    assert "renderUpcoming(x.upcoming_lockups)" in page
+    for key in ("reached_t5_windows", "complete_windows",
+                "incomplete_reached_windows", "provider_exhausted_windows",
+                "provider_error_windows", "backfill_candidate_windows",
+                "not_reached_t5_windows", "known_no_data_sessions",
+                "attempted_missing_sessions", "unattempted_retryable_sessions",
+                "future_not_reached_sessions"):
+        assert f"s.{key}" in page
+
+
+def test_dashboard_readiness_projection_delegates_to_canonical_service(monkeypatch):
+    expected = {"summary": {"complete_windows": 1}, "details": []}
+    captured = {}
+
+    def fake_audit(db, *, provider, as_of_date):
+        captured.update(db=db, provider=provider, as_of_date=as_of_date)
+        return expected
+
+    monkeypatch.setattr(research_dashboard, "audit_t5_signal_readiness", fake_audit)
+    sentinel = object()
+    assert get_t5_readiness(sentinel, today=CUTOFF) is expected
+    assert captured == {"db": sentinel, "provider": "massive", "as_of_date": CUTOFF}
+
+
+def test_dashboard_payload_runs_canonical_audit_once(monkeypatch):
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    calls = []
+    readiness = {"summary": {"complete_windows": 0}, "details": []}
+
+    def fake_audit(db, *, provider, as_of_date):
+        calls.append((provider, as_of_date))
+        return readiness
+
+    monkeypatch.setattr(research_dashboard, "audit_t5_signal_readiness", fake_audit)
+    try:
+        payload = get_t5_dashboard_payload(db, today=CUTOFF)
+
+        assert calls == [("massive", CUTOFF)]
+        assert payload["summary"] is readiness["summary"]
+        assert isinstance(payload["upcoming_lockups"], list)
+        assert all(row["t5_readiness"] is None
+                   for row in payload["upcoming_lockups"])
+    finally:
+        db.close()
 
 
 def test_t5_signal_window_is_21_canonical_sessions_and_independent_of_snapshot_status():
@@ -213,7 +269,8 @@ def test_t5_diagnostic_uses_event_derived_session_without_rewriting_lifecycle_da
 def test_research_routes_are_get_only():
     routes = Path("app/api/routes.py").read_text(encoding="utf-8")
     required_get_routes = {
-        "hypothesis", "summary", "upcoming-lockups", "prospective-signals",
+        "hypothesis", "summary", "upcoming-lockups", "t5-readiness",
+        "prospective-signals",
         "prospective-evaluation", "shadow-evaluation", "historical-reference",
     }
     for route in required_get_routes:
