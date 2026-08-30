@@ -42,7 +42,7 @@ def db():
 def add_signal(db, ipo, lockup, *, mode="strict_prospective", group="high_high",
                outcome=None, hypothesis=HYPOTHESIS, status=None):
     row = LockupProspectiveSignal(
-        hypothesis_id=hypothesis, hypothesis_version=VERSION, ipo_id=ipo.id,
+        hypothesis_id=hypothesis, hypothesis_version=VERSION, ipo_id=lockup.ipo_id,
         lockup_id=lockup.id, observation_offset=-5, observation_date=date(2026, 8, 25),
         event_date=date(2026, 9, 1), feature1_name="return_20d",
         feature1_value=Decimal("0.1"), feature1_threshold=Decimal("0.03"),
@@ -56,11 +56,51 @@ def add_signal(db, ipo, lockup, *, mode="strict_prospective", group="high_high",
 
 
 def clone_lockup(db, ipo, lockup, suffix):
-    clone = IPOLockup(ipo_id=ipo.id, filing_id=lockup.filing_id, holder_group="all",
+    clone_ipo = IPO(company_id=ipo.company_id, ipo_date=ipo.ipo_date, ipo_price=ipo.ipo_price,
+        classification_status="classified", candidate_type="operating_company_ipo",
+        offering_status="priced")
+    db.add(clone_ipo); db.flush()
+    clone = IPOLockup(ipo_id=clone_ipo.id, filing_id=lockup.filing_id, holder_group="all",
         lockup_type="standard", stated_expiration_date=date(2026, 9, 1), confidence=.9,
         parser_name="test", parser_version="1", source_excerpt="x", source_locator="x",
         evidence_key=f"m9a-{suffix}")
-    db.add(clone); db.flush(); return clone
+    db.add(clone); db.flush(); clone_ipo.primary_lockup_id = clone.id
+    return clone
+
+
+@pytest.mark.parametrize(("field", "outside_value"), [
+    ("classification_status", "needs_review"),
+    ("candidate_type", "spac"),
+    ("offering_status", "withdrawn"),
+])
+def test_ipo_cohort_predicates_independently_exclude_signal(db, field, outside_value):
+    session, ipo, lockup = db
+    included = add_signal(session, ipo, lockup, outcome=Decimal("-0.1"))
+    setattr(ipo, field, outside_value)
+    session.commit()
+
+    result = evaluate_m9a_prospective(session)
+
+    assert result["population"]["total_prospective_signals"] == 0
+    assert all(row["signal_id"] != included.id for row in result["observations"])
+
+
+def test_non_primary_persisted_lockup_is_excluded(db):
+    session, ipo, primary_lockup = db
+    non_primary = IPOLockup(
+        ipo_id=ipo.id, filing_id=primary_lockup.filing_id, holder_group="all",
+        lockup_type="standard", stated_expiration_date=date(2026, 9, 2), confidence=.9,
+        parser_name="test", parser_version="1", source_excerpt="x", source_locator="x",
+        evidence_key="m9a-non-primary")
+    session.add(non_primary); session.flush()
+    excluded = add_signal(session, ipo, non_primary, outcome=Decimal("-0.1"))
+    session.commit()
+
+    result = evaluate_m9a_prospective(session)
+
+    assert ipo.primary_lockup_id == primary_lockup.id
+    assert result["population"]["total_prospective_signals"] == 0
+    assert all(row["signal_id"] != excluded.id for row in result["observations"])
 
 
 def test_modes_historical_hypothesis_and_missing_outcome_are_isolated(db):
