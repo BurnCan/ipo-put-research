@@ -78,14 +78,37 @@ def run_m6_analysis() -> Any:
         return recompute_lockup_analyses(db, recompute=False, **COHORT)
 
 
-def run_m8_prospective(*, dry_run: bool = False) -> Any:
+def _run_m8_prospective(evaluation_mode: str, *, dry_run: bool = False) -> Any:
     from app.db import SessionLocal
     from app.services.prospective import update_prospective_lockup_signals
 
     with SessionLocal() as db:
         return update_prospective_lockup_signals(
-            db, hypothesis_id=FROZEN_HYPOTHESIS_ID, dry_run=dry_run, **COHORT
+            db, hypothesis_id=FROZEN_HYPOTHESIS_ID, evaluation_mode=evaluation_mode,
+            dry_run=dry_run, **COHORT
         )
+
+
+def run_m8_strict_prospective(*, dry_run: bool = False) -> Any:
+    return _run_m8_prospective("strict_prospective", dry_run=dry_run)
+
+
+def run_m8_shadow_prospective(*, dry_run: bool = False) -> Any:
+    return _run_m8_prospective("shadow_prospective", dry_run=dry_run)
+
+
+def _stage_definitions(
+    *, dry_run: bool, skip_market_history: bool, skip_m6: bool, skip_m8: bool,
+    market_stage: Callable[[], Any], m6_stage: Callable[[], Any],
+    m8_strict_stage: Callable[..., Any], m8_shadow_stage: Callable[..., Any],
+):
+    """Define the pipeline order once for execution and enabled-stage accounting."""
+    return (
+        ("market_history", skip_market_history, market_stage, {}),
+        ("m6_analysis", skip_m6, m6_stage, {}),
+        ("m8_strict_prospective", skip_m8, m8_strict_stage, {"dry_run": dry_run}),
+        ("m8_shadow_prospective", skip_m8, m8_shadow_stage, {"dry_run": dry_run}),
+    )
 
 
 def run_pipeline(
@@ -93,15 +116,16 @@ def run_pipeline(
     skip_m6: bool = False, skip_m8: bool = False,
     market_stage: Callable[[], Any] = run_market_history,
     m6_stage: Callable[[], Any] = run_m6_analysis,
-    m8_stage: Callable[..., Any] = run_m8_prospective,
+    m8_strict_stage: Callable[..., Any] = run_m8_strict_prospective,
+    m8_shadow_stage: Callable[..., Any] = run_m8_shadow_prospective,
     tracker=None,
 ) -> dict[str, Any]:
     """Execute enabled stages in dependency order and return one report."""
     report: dict[str, Any] = {"status": "ok", "started_at": _now(), "stages": {}}
-    stages = (
-        ("market_history", skip_market_history, market_stage, {}),
-        ("m6_analysis", skip_m6, m6_stage, {}),
-        ("m8_prospective", skip_m8, m8_stage, {"dry_run": dry_run}),
+    stages = _stage_definitions(
+        dry_run=dry_run, skip_market_history=skip_market_history, skip_m6=skip_m6,
+        skip_m8=skip_m8, market_stage=market_stage, m6_stage=m6_stage,
+        m8_strict_stage=m8_strict_stage, m8_shadow_stage=m8_shadow_stage,
     )
     for name, skipped, operation, kwargs in stages:
         if skipped:
@@ -170,7 +194,14 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> int:
             def __init__(self):
                 self.db = session_factory()
                 self.current_stage_id = None
-                enabled = 3 - sum((args.skip_market_history, args.skip_m6, args.skip_m8))
+                definitions = _stage_definitions(
+                    dry_run=args.dry_run, skip_market_history=args.skip_market_history,
+                    skip_m6=args.skip_m6, skip_m8=args.skip_m8,
+                    market_stage=run_market_history, m6_stage=run_m6_analysis,
+                    m8_strict_stage=run_m8_strict_prospective,
+                    m8_shadow_stage=run_m8_shadow_prospective,
+                )
+                enabled = sum(not skipped for _name, skipped, _operation, _kwargs in definitions)
                 self.run = start_run(self.db, trigger=os.environ.get("PIPELINE_TRIGGER", "manual"),
                                      stages_total=enabled)
             def start_stage(self, name):

@@ -169,7 +169,7 @@ US market close, such as 6:30 PM Eastern when the cron environment is configured
 is recommended. The Python command does not impose a timezone.
 
 Each invocation now stores its actual UTC start/finish, host, result, and the real
-`market_history`, `m6_analysis`, and `m8_prospective` stage results. The dashboard's **Last pipeline
+`market_history`, `m6_analysis`, `m8_strict_prospective`, and `m8_shadow_prospective` stage results. The dashboard's **Last pipeline
 run** is this execution provenance; **Latest market date** remains the independent
 `MAX(DailyPrice.trade_date)`. A successful holiday run need not advance that date. Runs before this
 feature was deployed are intentionally not reconstructed, so a new deployment initially reports
