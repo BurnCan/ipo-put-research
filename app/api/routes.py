@@ -8,7 +8,7 @@ from app.models import (Company, DailyPrice, Filing, FilingDocument, IPO, IPOFac
 from app.services.ipo_ingest import ingest_registration_filings
 from app.services.research_dashboard import (
     GROUPS, get_historical_reference, get_prospective_evaluation, get_shadow_evaluation,
-    get_prospective_signal_rows, get_research_summary, get_t5_dashboard_payload,
+    get_m9a_dashboard_payload, get_prospective_signal_rows, get_research_summary, get_t5_dashboard_payload,
     get_upcoming_lockups,
     hypothesis_metadata,
 )
@@ -92,6 +92,12 @@ def research_prospective_evaluation(db: Session = Depends(get_db)):
 @router.get("/research/shadow-evaluation")
 def research_shadow_evaluation(db: Session = Depends(get_db)):
     return get_shadow_evaluation(db)
+
+
+@router.get("/research/m9a-evaluation")
+def research_m9a_evaluation(db: Session = Depends(get_db)):
+    """Project strict and descriptive shadow M9A evidence in one read-only call."""
+    return get_m9a_dashboard_payload(db)
 
 
 @router.get("/research/historical-reference")

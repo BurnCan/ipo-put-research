@@ -14,10 +14,20 @@ from app.services.market_calendar import resolve_observation_session
 from app.services.market_data.t5_readiness import audit_t5_signal_readiness
 from app.services.prospective.evaluation import (evaluate_prospective_signals,
                                                   is_bearish_outcome)
+from app.services.prospective.m9a_evaluation import evaluate_m9a_prospective
+from app.services.prospective.signals import SHADOW, STRICT
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
 STRICT_EVALUATION_MODES = ("strict_prospective", "prospective")
+
+
+def get_m9a_dashboard_payload(db):
+    """Return both read-only M9A populations without combining their evidence."""
+    return {
+        STRICT: evaluate_m9a_prospective(db, evaluation_mode=STRICT),
+        SHADOW: evaluate_m9a_prospective(db, evaluation_mode=SHADOW),
+    }
 
 
 def get_t5_readiness(db, *, today=None):

@@ -2,16 +2,20 @@
 import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db import Base
+from app.db import Base, get_db
+from app.main import app
 from app.models import Company, Filing, IPO, IPOLockup, LockupProspectiveSignal
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.prospective.m9a_evaluation import evaluate_m9a_prospective
+from app.services.research_dashboard import get_m9a_dashboard_payload
 
 HYPOTHESIS = "m7_return20_vol20_minus5_post20"
 VERSION = FROZEN_HYPOTHESES[HYPOTHESIS].analysis_version
@@ -170,3 +174,70 @@ def test_evaluation_is_read_only_and_idempotent(db):
     assert first == second
     assert {c.name: getattr(persisted, c.name) for c in persisted.__table__.columns} == before
     assert session.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 1
+
+
+def test_m9a_get_endpoint_returns_both_evaluations(db):
+    session, ipo, lockup = db
+    add_signal(session, ipo, lockup, outcome=None)
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 77),
+               mode="shadow_prospective", group="high_low", outcome=None)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/research/m9a-evaluation")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strict_prospective"]["population"]["total_prospective_signals"] == 1
+    assert body["shadow_prospective"]["population"]["total_prospective_signals"] == 1
+    assert body["strict_prospective"]["observations"][0]["evaluation_mode"] == "strict_prospective"
+    assert body["shadow_prospective"]["observations"][0]["evaluation_mode"] == "shadow_prospective"
+
+
+def test_dashboard_payload_returns_separate_strict_and_shadow_evaluations_read_only(db):
+    session, ipo, lockup = db
+    strict_row = add_signal(session, ipo, lockup, group="high_high", outcome=None)
+    shadow_lockup = create_synthetic_lockup(session, ipo, 42)
+    shadow_row = add_signal(
+        session, ipo, shadow_lockup, mode="shadow_prospective",
+        group="high_low", outcome=Decimal("-0.25"))
+    session.commit()
+    before = session.scalar(select(func.count()).select_from(LockupProspectiveSignal))
+
+    payload = get_m9a_dashboard_payload(session)
+
+    assert set(payload) == {"strict_prospective", "shadow_prospective"}
+    strict = payload["strict_prospective"]
+    shadow = payload["shadow_prospective"]
+    assert [row["signal_id"] for row in strict["observations"]] == [strict_row.id]
+    assert [row["signal_id"] for row in shadow["observations"]] == [shadow_row.id]
+    assert strict["population"]["matured_signals"] == 0
+    assert strict["observations"][0]["post_20d_return"] is None
+    assert strict["observations"][0]["bearish_hit"] is None
+    assert strict["observations"][0]["signal_status"] == "awaiting_outcome"
+    assert shadow["observations"][0]["ticker"] == "M9A42"
+    assert shadow["observations"][0]["post_20d_return"] == -.25
+    assert shadow["interpretation_readiness"]["threshold_population"] == "strict_prospective"
+    assert shadow["interpretation_readiness"]["eligible_for_provisional_interpretation"] is False
+    assert not session.new and not session.dirty and not session.deleted
+    assert session.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == before
+
+
+def test_m9a_dashboard_uses_one_combined_get_endpoint_and_null_safe_rendering():
+    routes = Path("app/api/routes.py").read_text(encoding="utf-8")
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+
+    assert '@router.get("/research/m9a-evaluation")' in routes
+    assert "json('/api/research/m9a-evaluation')" in page
+    assert "json('/api/research/prospective-evaluation')" not in page
+    assert "json('/api/research/shadow-evaluation')" not in page
+    assert "o.bearish_hit===null?'—'" in page
+    assert "pct(o.post_20d_return,true)" in page
+    assert "SHADOW / DESCRIPTIVE" in page
+    assert "Shadow observations never contribute" in page
