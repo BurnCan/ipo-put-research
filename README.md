@@ -20,6 +20,22 @@ rewritten; disagreements with XNYS are reported for review. XNYS is the v1
 canonical US-equities calendar. Exchange-specific and foreign calendars are a
 future extension.
 
+### T-5 signal-readiness audit
+
+`scripts/audit_t5_signal_readiness.py` is a read-only audit of the exact 21
+canonical XNYS sessions ending at T-5 that are required by `return_20d` and
+`realized_vol_20d`. It compares those fixed calendar sessions with actual
+`DailyPrice` rows and classifies missing dates using configured-provider attempt
+provenance; it performs no provider calls, writes, interpolation, or synthetic
+substitution. This narrowly scoped feature-readiness result is **not** overall
+M6 v2 `snapshot_status` completeness.
+
+```bash
+python scripts/audit_t5_signal_readiness.py --classification-status classified \
+  --candidate-type operating_company_ipo --offering-status priced \
+  --primary-lockup-only --as-of-date 2026-08-29
+```
+
 ## Current capabilities
 
 - Downloads SEC EDGAR quarterly `master.idx` files.
