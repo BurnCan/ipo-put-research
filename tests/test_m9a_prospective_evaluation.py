@@ -55,15 +55,19 @@ def add_signal(db, ipo, lockup, *, mode="strict_prospective", group="high_high",
     return row
 
 
-def clone_lockup(db, ipo, lockup, suffix):
-    clone_ipo = IPO(company_id=ipo.company_id, ipo_date=ipo.ipo_date, ipo_price=ipo.ipo_price,
-        classification_status="classified", candidate_type="operating_company_ipo",
-        offering_status="priced")
-    db.add(clone_ipo); db.flush()
-    clone = IPOLockup(ipo_id=clone_ipo.id, filing_id=lockup.filing_id, holder_group="all",
+def create_synthetic_lockup(db, ipo, suffix):
+    company = Company(cik=f"{100000 + suffix:010d}", name=f"M9A Clone {suffix}",
+                      ticker=f"M9A{suffix}")
+    filing = Filing(company=company, form_type="424B4", filed_at=date(2026, 1, 2),
+                    accession_number=f"m9a-clone-{suffix}",
+                    filing_path=f"m9a-clone-{suffix}.txt", sec_url="https://example.test")
+    clone_ipo = IPO(company=company, ipo_date=ipo.ipo_date, ipo_price=ipo.ipo_price,
+                    classification_status="classified", candidate_type="operating_company_ipo",
+                    offering_status="priced")
+    clone = IPOLockup(ipo=clone_ipo, filing=filing, holder_group="all",
         lockup_type="standard", stated_expiration_date=date(2026, 9, 1), confidence=.9,
         parser_name="test", parser_version="1", source_excerpt="x", source_locator="x",
-        evidence_key=f"m9a-{suffix}")
+        evidence_key=f"m9a-clone-{suffix}")
     db.add(clone); db.flush(); clone_ipo.primary_lockup_id = clone.id
     return clone
 
@@ -106,10 +110,10 @@ def test_non_primary_persisted_lockup_is_excluded(db):
 def test_modes_historical_hypothesis_and_missing_outcome_are_isolated(db):
     session, ipo, lockup = db
     add_signal(session, ipo, lockup, outcome=Decimal("-0.1"))
-    add_signal(session, ipo, clone_lockup(session, ipo, lockup, 2), mode="shadow_prospective", outcome=Decimal("-0.2"))
-    add_signal(session, ipo, clone_lockup(session, ipo, lockup, 3), mode="historical", outcome=Decimal("-0.3"))
-    add_signal(session, ipo, clone_lockup(session, ipo, lockup, 4), hypothesis="another", outcome=Decimal("-0.4"))
-    add_signal(session, ipo, clone_lockup(session, ipo, lockup, 5), outcome=None)
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 2), mode="shadow_prospective", outcome=Decimal("-0.2"))
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 3), mode="historical", outcome=Decimal("-0.3"))
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 4), hypothesis="another", outcome=Decimal("-0.4"))
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 5), outcome=None)
     session.commit()
     strict = evaluate_m9a_prospective(session)
     shadow = evaluate_m9a_prospective(session, evaluation_mode="shadow_prospective")
@@ -124,9 +128,9 @@ def test_classification_groups_statistics_and_json(db):
     values = [("high_high", "-0.2"), ("high_high", "0"), ("high_low", "0.1"),
               ("low_high", "-0.4")]
     for i, (group, value) in enumerate(values):
-        add_signal(session, ipo, lockup if i == 0 else clone_lockup(session, ipo, lockup, i),
+        add_signal(session, ipo, lockup if i == 0 else create_synthetic_lockup(session, ipo, i),
                    group=group, outcome=Decimal(value))
-    add_signal(session, ipo, clone_lockup(session, ipo, lockup, 9), group="low_low")
+    add_signal(session, ipo, create_synthetic_lockup(session, ipo, 9), group="low_low")
     session.commit()
     result = evaluate_m9a_prospective(session)
     assert result["primary_outcome"] == {"matured_bearish_outcomes": 2,
@@ -149,7 +153,7 @@ def test_classification_groups_statistics_and_json(db):
 def test_strict_readiness_thresholds(db, total, targets, ready):
     session, ipo, lockup = db
     for i in range(total):
-        add_signal(session, ipo, lockup if i == 0 else clone_lockup(session, ipo, lockup, i),
+        add_signal(session, ipo, lockup if i == 0 else create_synthetic_lockup(session, ipo, i),
                    group="high_high" if i < targets else "low_low", outcome=Decimal("-0.01"))
     session.commit()
     result = evaluate_m9a_prospective(session)
