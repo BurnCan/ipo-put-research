@@ -130,7 +130,7 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "window.location='/api/ipos/" not in page
     assert "v??'—'" in page  # the escaping helper has an explicit null fallback
     assert "T-5 signal market data" in page
-    assert "known no-data" in page
+    assert "Known no-data sessions" in page
 
 
 def test_hypothesis_explanation_uses_registry_values_and_preserves_evidence_roles():
