@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -13,7 +14,10 @@ from app.main import app
 from app.models import Company, DailyPrice, IPO, IPOMarketSummary, Security
 from app.services.market_data.base import DailyBar, MarketDataError, ProviderConfigurationError
 from app.services.market_data.massive import MassiveMarketDataProvider
-from app.services.market_history import ingest_market_history
+from app.services.market_history import (
+    MARKET_HISTORY_POST_CLOSE_CUTOFF, ingest_market_history,
+    latest_completed_market_session,
+)
 from app.services.market_summary import recompute_market_summaries
 from app.services.schema_upgrade import upgrade_milestone_5
 
@@ -64,6 +68,34 @@ class Provider:
 
 def bar(day, close="11", high="12"):
     return DailyBar(day, Decimal("10"), Decimal(high), Decimal("9"), Decimal(close), 1234)
+
+
+@pytest.mark.parametrize(("now", "expected"), [
+    (datetime(2026, 8, 28, 18, 1, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 28)),
+    (datetime(2026, 8, 28, 17, 59, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 27)),
+    (datetime(2026, 8, 29, 12, 0, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 28)),
+    (datetime(2026, 8, 30, 12, 0, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 28)),
+    (datetime(2026, 8, 31, 18, 1, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 31)),
+    (datetime(2026, 8, 31, 17, 59, tzinfo=ZoneInfo("America/New_York")), date(2026, 8, 28)),
+    # Labor Day is an XNYS holiday.
+    (datetime(2026, 9, 7, 19, 0, tzinfo=ZoneInfo("America/New_York")), date(2026, 9, 4)),
+])
+def test_latest_completed_market_session(now, expected):
+    assert latest_completed_market_session(now) == expected
+
+
+def test_latest_completed_market_session_converts_to_new_york_time():
+    # 21:00 UTC is 5:00 PM EDT, still before the New York cutoff.
+    assert latest_completed_market_session(datetime(2026, 8, 28, 21, tzinfo=UTC)) == date(2026, 8, 27)
+
+
+def test_market_history_cutoff_is_documented_six_pm():
+    assert MARKET_HISTORY_POST_CLOSE_CUTOFF.isoformat() == "18:00:00"
+
+
+def test_latest_completed_market_session_rejects_naive_time():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        latest_completed_market_session(datetime(2026, 8, 28, 19))
 
 
 def test_massive_normalizes_response_and_requests_raw_bars():
@@ -120,6 +152,32 @@ def test_ingest_initializes_security_creates_bars_and_is_idempotent():
         assert db.scalar(select(func.count()).select_from(DailyPrice)) == 1
         assert ipo.ipo_date == date(2025, 1, 2)
         assert ipo.market_summary.first_trade_date == date(2025, 1, 3)
+
+
+def test_ingest_preserves_explicit_end_date_without_calendar_rewriting(monkeypatch):
+    def unexpected_default():
+        raise AssertionError("explicit end_date must bypass the current-session helper")
+
+    monkeypatch.setattr("app.services.market_history.latest_completed_market_session", unexpected_default)
+    provider = Provider([])
+    with Session(database()) as db:
+        add_ipo(db, ipo_date=date(2026, 8, 28))
+        ingest_market_history(db, provider, end_date=date(2026, 8, 28))
+
+    assert provider.calls == [("MKT", date(2026, 8, 28), date(2026, 8, 28))]
+
+
+def test_ingest_uses_latest_completed_session_when_end_date_is_omitted(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_history.latest_completed_market_session",
+        lambda: date(2026, 8, 28),
+    )
+    provider = Provider([])
+    with Session(database()) as db:
+        add_ipo(db, ipo_date=date(2026, 8, 28))
+        ingest_market_history(db, provider)
+
+    assert provider.calls == [("MKT", date(2026, 8, 28), date(2026, 8, 28))]
 
 
 @pytest.mark.parametrize(("argument", "value"), [

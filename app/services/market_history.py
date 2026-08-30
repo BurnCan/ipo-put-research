@@ -1,15 +1,46 @@
 import time
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Company, DailyPrice, IPO, Security, utc_now
+from app.services.market_calendar import is_session, session_offset, session_on_or_before
 from app.services.market_data.base import MarketDataProvider
 from app.services.market_data.massive import MassiveMarketDataProvider
 from app.services.market_summary import recompute_market_summary
+
+
+MARKET_TIME_ZONE = ZoneInfo("America/New_York")
+# The regular XNYS session closes at 4:00 PM ET. Waiting until 6:00 PM ET gives
+# providers a conservative publication buffer while still preceding the normal
+# 6:30 PM ET pipeline run.
+MARKET_HISTORY_POST_CLOSE_CUTOFF = datetime_time(18, 0)
+
+
+def latest_completed_market_session(now: datetime | None = None) -> date:
+    """Return the latest canonical XNYS session eligible for daily ingestion.
+
+    ``now`` must be timezone-aware when supplied and is converted to New York
+    time. Calendar identity comes from :mod:`market_calendar`; the cutoff only
+    decides whether today's session has had enough post-close publication time.
+    It does not assert that a provider's bar exists or is complete.
+    """
+    if now is None:
+        now = datetime.now(MARKET_TIME_ZONE)
+    elif now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+
+    market_now = now.astimezone(MARKET_TIME_ZONE)
+    market_day = market_now.date()
+    if not is_session(market_day):
+        return session_on_or_before(market_day)
+    if market_now.time().replace(tzinfo=None) >= MARKET_HISTORY_POST_CLOSE_CUTOFF:
+        return market_day
+    return session_offset(market_day, -1)
 
 
 @dataclass
@@ -82,7 +113,10 @@ def ingest_market_history(db: Session, provider: MarketDataProvider, *, limit: i
     if limit:
         stmt = stmt.limit(limit)
     rows = db.execute(stmt).all()
-    effective_end = end_date or (date.today() - timedelta(days=1))
+    # Calendar-yesterday systematically omitted the current session from an
+    # after-close run (especially on Fridays). Use the canonical session
+    # sequence while preserving an explicit caller-provided boundary verbatim.
+    effective_end = end_date if end_date is not None else latest_completed_market_session()
     lookback_days = (initial_lookback_days if initial_lookback_days is not None
                      else settings.market_initial_lookback_days)
     recent_days = refresh_days if refresh_days is not None else settings.market_refresh_days
