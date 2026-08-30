@@ -45,18 +45,25 @@ def test_success_order_results_timestamps_cohort_and_frozen_hypothesis(monkeypat
         calls.append("m6")
         return {"snapshots": 3}
 
-    def m8(**kwargs):
-        calls.append(("m8", kwargs))
+    def strict(**kwargs):
+        calls.append(("strict", kwargs))
         return {"signals": 1}
 
-    report = pipeline.run_pipeline(market_stage=market, m6_stage=m6, m8_stage=m8)
+    def shadow(**kwargs):
+        calls.append(("shadow", kwargs))
+        return {"signals": 2}
+
+    report = pipeline.run_pipeline(market_stage=market, m6_stage=m6,
+                                   m8_strict_stage=strict, m8_shadow_stage=shadow)
     assert report["status"] == "ok"
-    assert calls == ["market", "m6", ("m8", {"dry_run": False})]
+    assert calls == ["market", "m6", ("strict", {"dry_run": False}),
+                     ("shadow", {"dry_run": False})]
     assert report["started_at"].endswith("+00:00")
     assert report["finished_at"].endswith("+00:00")
     assert report["stages"]["market_history"]["result"] == {"bars": 2}
     assert report["stages"]["m6_analysis"]["result"] == {"snapshots": 3}
-    assert report["stages"]["m8_prospective"]["result"] == {"signals": 1}
+    assert report["stages"]["m8_strict_prospective"]["result"] == {"signals": 1}
+    assert report["stages"]["m8_shadow_prospective"]["result"] == {"signals": 2}
     assert pipeline.FROZEN_HYPOTHESIS_ID == "m7_return20_vol20_minus5_post20"
     assert pipeline.COHORT == {
         "classification_status": "classified",
@@ -80,11 +87,12 @@ def test_failure_is_fail_fast(failed_stage):
 
     report = pipeline.run_pipeline(
         market_stage=stage("market"), m6_stage=stage("m6"),
-        m8_stage=lambda **kwargs: calls.append("m8"),
+        m8_strict_stage=lambda **kwargs: calls.append("strict"),
+        m8_shadow_stage=lambda **kwargs: calls.append("shadow"),
     )
     assert report["status"] == "failed"
     assert report["failed_stage"] == ("market_history" if failed_stage == "market" else "m6_analysis")
-    assert "m8" not in calls
+    assert "strict" not in calls and "shadow" not in calls
     assert report["finished_at"].endswith("+00:00")
 
 
@@ -96,7 +104,8 @@ def test_main_exit_logging_parent_creation_dry_run_and_skips(
         seen.append(kwargs)
         return {"status": "ok", "started_at": "a", "finished_at": "b", "stages": {
             "market_history": {"status": "skipped"}, "m6_analysis": {"status": "skipped"},
-            "m8_prospective": {"status": "ok", "result": {}},
+            "m8_strict_prospective": {"status": "ok", "result": {}},
+            "m8_shadow_prospective": {"status": "ok", "result": {}},
         }}
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run)
@@ -261,8 +270,95 @@ def test_skips_are_explicit_and_dry_run_reaches_only_m8():
     report = pipeline.run_pipeline(
         dry_run=True, skip_market_history=True, skip_m6=True,
         market_stage=lambda: calls.append("market"), m6_stage=lambda: calls.append("m6"),
-        m8_stage=lambda **kwargs: calls.append(kwargs) or {},
+        m8_strict_stage=lambda **kwargs: calls.append(("strict", kwargs)) or {},
+        m8_shadow_stage=lambda **kwargs: calls.append(("shadow", kwargs)) or {},
     )
-    assert calls == [{"dry_run": True}]
+    assert calls == [("strict", {"dry_run": True}), ("shadow", {"dry_run": True})]
     assert report["stages"]["market_history"] == {"status": "skipped"}
     assert report["stages"]["m6_analysis"] == {"status": "skipped"}
+
+
+def test_skip_m8_skips_both_prospective_stages():
+    calls = []
+    report = pipeline.run_pipeline(
+        skip_m8=True, market_stage=lambda: {}, m6_stage=lambda: {},
+        m8_strict_stage=lambda **kwargs: calls.append("strict"),
+        m8_shadow_stage=lambda **kwargs: calls.append("shadow"),
+    )
+    assert calls == []
+    assert report["stages"]["m8_strict_prospective"] == {"status": "skipped"}
+    assert report["stages"]["m8_shadow_prospective"] == {"status": "skipped"}
+
+
+def test_strict_failure_prevents_shadow_and_shadow_failure_preserves_strict_success():
+    calls = []
+
+    def fail(name):
+        calls.append(name)
+        raise RuntimeError(f"{name} failed")
+
+    strict_failure = pipeline.run_pipeline(
+        market_stage=lambda: {}, m6_stage=lambda: {},
+        m8_strict_stage=lambda **kwargs: fail("strict"),
+        m8_shadow_stage=lambda **kwargs: calls.append("shadow"),
+    )
+    assert strict_failure["failed_stage"] == "m8_strict_prospective"
+    assert calls == ["strict"]
+
+    calls.clear()
+    shadow_failure = pipeline.run_pipeline(
+        market_stage=lambda: {}, m6_stage=lambda: {},
+        m8_strict_stage=lambda **kwargs: calls.append("strict") or {},
+        m8_shadow_stage=lambda **kwargs: fail("shadow"),
+    )
+    assert shadow_failure["status"] == "failed"
+    assert shadow_failure["failed_stage"] == "m8_shadow_prospective"
+    assert shadow_failure["stages"]["m8_strict_prospective"]["status"] == "ok"
+    assert shadow_failure["stages"]["m8_shadow_prospective"]["status"] == "failed"
+    assert calls == ["strict", "shadow"]
+
+
+def test_m8_updaters_pass_explicit_separate_evaluation_modes(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        def __enter__(self):
+            return "db"
+
+        def __exit__(self, *args):
+            return None
+
+    fake_db = types.ModuleType("app.db")
+    fake_db.SessionLocal = FakeSession
+    fake_prospective = types.ModuleType("app.services.prospective")
+    fake_prospective.update_prospective_lockup_signals = (
+        lambda db, **kwargs: calls.append((db, kwargs)) or {}
+    )
+    monkeypatch.setitem(sys.modules, "app.db", fake_db)
+    monkeypatch.setitem(sys.modules, "app.services.prospective", fake_prospective)
+
+    pipeline.run_m8_strict_prospective(dry_run=True)
+    pipeline.run_m8_shadow_prospective(dry_run=True)
+    assert [call[1]["evaluation_mode"] for call in calls] == [
+        "strict_prospective", "shadow_prospective"]
+    assert all(call[1]["dry_run"] is True for call in calls)
+    assert all(call[1]["hypothesis_id"] == pipeline.FROZEN_HYPOTHESIS_ID for call in calls)
+    assert all({key: call[1][key] for key in pipeline.COHORT} == pipeline.COHORT
+               for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [([], 4), (["--skip-market-history"], 3), (["--skip-m6"], 3),
+     (["--skip-m8"], 2),
+     (["--skip-market-history", "--skip-m6", "--skip-m8"], 0)],
+)
+def test_enabled_stage_provenance(arguments, expected, tmp_path, provenance_database, monkeypatch):
+    session_factory, engine = provenance_database
+    monkeypatch.setattr(pipeline, "run_pipeline", lambda **kwargs: {
+        "status": "ok", "started_at": "a", "finished_at": "b", "stages": {}})
+    assert pipeline.main([
+        *arguments, "--lock-file", str(tmp_path / f"{expected}.lock")
+    ], session_factory=session_factory) == 0
+    with Session(engine) as db:
+        assert db.scalar(select(PipelineRun).order_by(PipelineRun.id.desc())).stages_total == expected

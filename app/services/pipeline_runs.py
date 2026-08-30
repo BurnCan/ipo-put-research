@@ -22,7 +22,7 @@ def concise_error(error: object | None) -> str | None:
     return str(error).replace("\n", " ")[:500]
 
 
-def start_run(db, *, trigger: str = "manual", stages_total: int = 3) -> PipelineRun:
+def start_run(db, *, trigger: str = "manual", stages_total: int = 4) -> PipelineRun:
     run = PipelineRun(pipeline_name=PIPELINE_NAME, started_at=now_utc(), status="running",
                       trigger=trigger, hostname=socket.gethostname(), stages_total=stages_total)
     db.add(run); db.commit(); db.refresh(run)
