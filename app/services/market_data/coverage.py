@@ -207,6 +207,48 @@ def record_backfill_attempt(db: Session, security: Security, provider: str,
     return row
 
 
+def equivalent_backfill_attempt(db: Session, security: Security, provider: str,
+                                start_date: date, end_date: date,
+                                status: str) -> MarketDataBackfillAttempt | None:
+    """Find equivalent request provenance without changing the stored attempt."""
+    return db.scalar(select(MarketDataBackfillAttempt).where(
+        MarketDataBackfillAttempt.security_id == security.id,
+        MarketDataBackfillAttempt.provider == provider,
+        MarketDataBackfillAttempt.requested_start_date == start_date,
+        MarketDataBackfillAttempt.requested_end_date == end_date,
+        MarketDataBackfillAttempt.status == status).order_by(
+            MarketDataBackfillAttempt.id))
+
+
+def record_backfill_attempt_if_missing(
+        db: Session, security: Security, provider: str, start_date: date,
+        end_date: date, status: str, *, bars_returned: int | None = None,
+        bars_created: int | None = None, bars_updated: int | None = None,
+        error_message: str | None = None,
+        commit: bool = True) -> tuple[MarketDataBackfillAttempt, bool]:
+    """Idempotently reconcile legacy/manual provenance.
+
+    This application-level guard is deliberately separate from the database
+    schema: genuine future retries may have the same request identity.  An
+    existing row is returned untouched, including its ``attempted_at`` value.
+    """
+    # Apply the same validation even when an equivalent lookup would otherwise
+    # simply return no row.
+    if status not in {"success", "no_data", "partial", "error"}:
+        raise ValueError("status must be success, no_data, partial, or error")
+    if start_date > end_date:
+        raise ValueError("start date must not be after end date")
+    existing = equivalent_backfill_attempt(
+        db, security, provider, start_date, end_date, status)
+    if existing is not None:
+        return existing, False
+    row = record_backfill_attempt(
+        db, security, provider, start_date, end_date, status,
+        bars_returned=bars_returned, bars_created=bars_created,
+        bars_updated=bars_updated, error_message=error_message, commit=commit)
+    return row, True
+
+
 def backfill_missing_sessions(db: Session, provider: MarketDataProvider, security: Security,
                               start_date: date, end_date: date, *, as_of_date: date | None = None,
                               dry_run: bool = False,

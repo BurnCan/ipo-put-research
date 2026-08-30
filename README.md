@@ -1272,15 +1272,27 @@ python scripts/backfill_market_data_gaps.py --ticker NBRG \
   --retry-known-no-data
 ```
 
-Pre-feature attempts are never inferred or seeded by schema upgrades. Record
-an observed historical attempt explicitly (counts remain null rather than
-being fabricated) using a unique ticker or, preferably, durable security ID:
+### Reconcile a historical provider attempt (no fetch)
+
+Pre-feature attempts are never inferred or seeded by schema upgrades. Use the
+provenance-only reconciliation command to record an observed historical
+attempt against its unique ticker. Start with `--dry-run`; the command never
+constructs a provider, fetches market data, or creates `DailyPrice` rows:
 
 ```bash
-python scripts/record_market_data_backfill_attempt.py --security-id 47 \
+python scripts/record_market_data_backfill_attempt.py --ticker EXAMPLE \
   --provider massive --start-date 2026-05-15 --end-date 2026-05-20 \
-  --status no_data
+  --status no_data --bars-returned 0 --bars-created 0 --bars-updated 0 \
+  --dry-run
 ```
+
+Omit `--provider` to use the configured `MARKET_DATA_PROVIDER`. Equivalent
+manual entries are idempotent and report `already_present` without changing
+the original attempt time. A `no_data` entry suppresses redundant requests to
+that same provider. Record a provider failure as `error` (optionally with
+`--error-message`): errors remain retryable and do not make the range
+provider-exhausted. Remove `--dry-run` only after reviewing the structured JSON
+output.
 
 In short: calendar determines identity, market data determines completeness,
 and backfill provenance determines only what has already been attempted.
