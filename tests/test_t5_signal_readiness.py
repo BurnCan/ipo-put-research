@@ -89,6 +89,28 @@ def test_error_precedes_no_data_and_unattempted_readiness():
     assert required2[1] in item2["unattempted_retryable_dates"]
 
 
+def test_success_and_partial_attempts_with_absent_bars_are_attempted_missing():
+    db, _, security, _, required = _db()
+    _attempt(db, security, required[0], "success")
+    _attempt(db, security, required[1], "partial")
+
+    report = _report(db)
+    item = report["details"][0]
+    classifications = {entry["session"]: entry["classification"]
+                       for entry in item["session_classifications"]}
+
+    assert item["readiness"] == "backfill_candidate"
+    assert item["attempted_missing_dates"] == list(required[:2])
+    assert item["attempted_missing_count"] == 2
+    assert required[0] not in item["unattempted_retryable_dates"]
+    assert required[1] not in item["unattempted_retryable_dates"]
+    assert classifications[required[0]] == "attempted_missing"
+    assert classifications[required[1]] == "attempted_missing"
+    assert report["summary"]["attempted_missing_sessions"] == 2
+    assert report["summary"]["unattempted_retryable_sessions"] == 19
+    assert report["summary"]["retryable_sessions"] == 21
+
+
 def test_later_no_data_resolves_historical_error():
     db, _, security, _, required = _db()
     for day in required:

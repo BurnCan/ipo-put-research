@@ -81,14 +81,16 @@ def audit_t5_signal_readiness(db, *, provider, as_of_date=None,
          resolution, required) in planned:
         diagnostic = diagnostics[key]
         readiness = _readiness(diagnostic, resolution.observation_session, as_of)
-        retryable_dates = sorted(diagnostic["attempted_missing_sessions"] +
-                                 diagnostic["unattempted_missing_sessions"])
+        attempted_missing_dates = diagnostic["attempted_missing_sessions"]
+        unattempted_retryable_dates = diagnostic["unattempted_missing_sessions"]
         categories = {}
         for day in diagnostic["present_sessions"]: categories[day] = "present"
         for day in diagnostic["not_reached_sessions"]: categories[day] = "future_not_reached"
         for day in diagnostic["known_no_data_sessions"]: categories[day] = "known_no_data"
         for day in diagnostic["provider_error_sessions"]: categories[day] = "provider_error"
-        for day in retryable_dates: categories[day] = "unattempted_retryable"
+        for day in attempted_missing_dates: categories[day] = "attempted_missing"
+        for day in unattempted_retryable_dates:
+            categories[day] = "unattempted_retryable"
         future_anomaly = (resolution.observation_session <= as_of and
                           bool(diagnostic["not_reached_sessions"]))
         details.append({
@@ -109,8 +111,10 @@ def audit_t5_signal_readiness(db, *, provider, as_of_date=None,
             "known_no_data_count": diagnostic["known_no_data_count"],
             "provider_error_dates": diagnostic["provider_error_sessions"],
             "provider_error_count": diagnostic["provider_error_count"],
-            "unattempted_retryable_dates": retryable_dates,
-            "unattempted_retryable_count": len(retryable_dates),
+            "attempted_missing_dates": attempted_missing_dates,
+            "attempted_missing_count": diagnostic["attempted_missing_count"],
+            "unattempted_retryable_dates": unattempted_retryable_dates,
+            "unattempted_retryable_count": diagnostic["unattempted_missing_count"],
             "future_not_reached_dates": diagnostic["not_reached_sessions"],
             "future_not_reached_count": diagnostic["not_reached_count"],
             "reached_window_contains_future_session": future_anomaly,
@@ -131,7 +135,10 @@ def audit_t5_signal_readiness(db, *, provider, as_of_date=None,
         "total_missing_sessions": sum(x["missing_session_count"] for x in details),
         "known_no_data_sessions": sum(x["known_no_data_count"] for x in details),
         "provider_error_sessions": sum(x["provider_error_count"] for x in details),
+        "attempted_missing_sessions": sum(x["attempted_missing_count"] for x in details),
         "unattempted_retryable_sessions": sum(x["unattempted_retryable_count"] for x in details),
+        "retryable_sessions": sum(x["attempted_missing_count"] +
+                                  x["unattempted_retryable_count"] for x in details),
         "future_not_reached_sessions": sum(x["future_not_reached_count"] for x in details),
         "provider_exhausted_windows": counts["provider_exhausted"],
         "provider_error_windows": counts["provider_error"],
