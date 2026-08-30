@@ -57,6 +57,10 @@ def evaluate_m9a_prospective(db, *, evaluation_mode: str = STRICT,
                 LockupProspectiveSignal.hypothesis_version == frozen.analysis_version,
                 LockupProspectiveSignal.evaluation_mode.in_(modes),
                 LockupProspectiveSignal.signal_status != "unavailable",
+                IPO.classification_status == "classified",
+                IPO.candidate_type == "operating_company_ipo",
+                IPO.offering_status == "priced",
+                LockupProspectiveSignal.lockup_id == IPO.primary_lockup_id,
             ).order_by(LockupProspectiveSignal.id))
     records = list(db.execute(stmt))
     rows = [record[0] for record in records]
