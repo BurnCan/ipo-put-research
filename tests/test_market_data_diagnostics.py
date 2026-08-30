@@ -69,6 +69,9 @@ def test_no_data_range_ignores_non_sessions_and_provider_identity():
                                          as_of=date(2026, 6, 1))
     assert result["status"] == "known_no_data"
     assert result["known_no_data_sessions"] == list(required)
+    assert result["present_count"] == 0
+    assert result["missing_sessions"] == list(required)
+    assert "return_20d" not in result and "realized_vol_20d" not in result
     assert date(2026, 5, 9) not in result["known_no_data_sessions"]  # Saturday
     other = diagnose_market_data_window(db, security_id, "B", required,
                                         as_of=date(2026, 6, 1))
@@ -102,3 +105,18 @@ def test_latest_overlapping_attempt_deterministically_wins():
     later = diagnose_market_data_window(db, security_id, "configured", (day,),
                                         as_of=date(2026, 6, 1))
     assert later["status"] == "provider_error"
+
+
+def test_future_and_provider_exhausted_sessions_remain_separate_and_missing():
+    db, security_id = _db()
+    past, future = date(2026, 5, 4), date(2026, 5, 6)
+    _attempt(db, security_id, past, past, "no_data")
+
+    result = diagnose_market_data_window(
+        db, security_id, "configured", (past, future), as_of=date(2026, 5, 5))
+
+    assert result["status"] == "mixed_attempt_history"
+    assert result["known_no_data_sessions"] == [past]
+    assert result["not_reached_sessions"] == [future]
+    assert result["missing_sessions"] == [past, future]
+    assert result["present_sessions"] == []
