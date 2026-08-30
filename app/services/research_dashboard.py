@@ -26,6 +26,15 @@ def get_t5_readiness(db, *, today=None):
         db, provider=settings.market_data_provider, as_of_date=today or date.today())
 
 
+def get_t5_dashboard_payload(db, *, today=None):
+    """Supply the dashboard's readiness summary and row projection from one audit."""
+    today = today or date.today()
+    readiness = get_t5_readiness(db, today=today)
+    return {**readiness,
+            "upcoming_lockups": get_upcoming_lockups(
+                db, today=today, t5_readiness=readiness)}
+
+
 def classify_prospective_result(signal, spec=None):
     """Interpret only a stored, mature outcome relative to the frozen target."""
     if signal is None or signal.signal_status != "matured" or \
@@ -132,7 +141,7 @@ def get_prospective_signal_rows(db, *, status=None, interaction_group=None, tick
     return [_signal_dict(signal, company) for signal, company in db.execute(stmt)]
 
 
-def get_upcoming_lockups(db, *, today=None):
+def get_upcoming_lockups(db, *, today=None, t5_readiness=None):
     today = today or date.today()
     spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
     latest = db.scalar(select(func.max(DailyPrice.trade_date)))
@@ -252,7 +261,10 @@ def get_upcoming_lockups(db, *, today=None):
             "calendar_days_to_event": (event_date - today).days if event_date else None})
     # One canonical service invocation batches price and attempt provenance for
     # the entire cohort. Rendering never fetches data or mutates persistence.
-    audit = get_t5_readiness(db, today=today)
+    # The dashboard passes its already-computed canonical audit.  Retain the
+    # fallback for backward-compatible direct consumers of this projection.
+    audit = t5_readiness if t5_readiness is not None else get_t5_readiness(
+        db, today=today)
     diagnostics = {item["lockup_id"]: item for item in audit["details"]
                    if item.get("required_session_count")}
     for row in result:

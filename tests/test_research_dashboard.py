@@ -16,6 +16,7 @@ from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
 from app.services.research_dashboard import (HYPOTHESIS_ID, classify_prospective_result,
                                                get_research_summary,
+                                               get_t5_dashboard_payload,
                                                get_t5_readiness,
                                                get_upcoming_lockups,
                                                hypothesis_metadata)
@@ -129,7 +130,7 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "window.location='/api/ipos/" not in page
     assert "v??'—'" in page  # the escaping helper has an explicit null fallback
     assert "T-5 signal market data" in page
-    assert "known no-data" in page
+    assert "Known no-data sessions" in page
 
 
 def test_hypothesis_explanation_uses_registry_values_and_preserves_evidence_roles():
@@ -171,6 +172,8 @@ def test_dashboard_readiness_summary_exposes_window_and_session_counts():
     page = Path("app/templates/index.html").read_text(encoding="utf-8")
 
     assert "/api/research/t5-readiness" in page
+    assert "json('/api/research/upcoming-lockups')" not in page
+    assert "renderUpcoming(x.upcoming_lockups)" in page
     for key in ("reached_t5_windows", "complete_windows",
                 "incomplete_reached_windows", "provider_exhausted_windows",
                 "provider_error_windows", "backfill_candidate_windows",
@@ -192,6 +195,28 @@ def test_dashboard_readiness_projection_delegates_to_canonical_service(monkeypat
     sentinel = object()
     assert get_t5_readiness(sentinel, today=CUTOFF) is expected
     assert captured == {"db": sentinel, "provider": "massive", "as_of_date": CUTOFF}
+
+
+def test_dashboard_payload_runs_canonical_audit_once(monkeypatch):
+    db, _historical_id, _pending_id, _signaled_id = _dashboard_database()
+    calls = []
+    readiness = {"summary": {"complete_windows": 0}, "details": []}
+
+    def fake_audit(db, *, provider, as_of_date):
+        calls.append((provider, as_of_date))
+        return readiness
+
+    monkeypatch.setattr(research_dashboard, "audit_t5_signal_readiness", fake_audit)
+    try:
+        payload = get_t5_dashboard_payload(db, today=CUTOFF)
+
+        assert calls == [("massive", CUTOFF)]
+        assert payload["summary"] is readiness["summary"]
+        assert isinstance(payload["upcoming_lockups"], list)
+        assert all(row["t5_readiness"] is None
+                   for row in payload["upcoming_lockups"])
+    finally:
+        db.close()
 
 
 def test_t5_signal_window_is_21_canonical_sessions_and_independent_of_snapshot_status():
