@@ -10,16 +10,20 @@ from app.services.backtest.analysis import (FROZEN_HYPOTHESES,
                                              analyze_two_feature_interaction)
 from app.services.backtest.dataset import build_backtest_dataset
 from app.services.event_analysis.constants import SNAPSHOT_VERSION
-from app.services.market_calendar import (resolve_observation_session, session_offset,
-                                          sessions_in_range)
-from app.services.market_data.diagnostics import (DiagnosticRequest,
-                                                  diagnose_market_data_windows)
+from app.services.market_calendar import resolve_observation_session
+from app.services.market_data.t5_readiness import audit_t5_signal_readiness
 from app.services.prospective.evaluation import (evaluate_prospective_signals,
                                                   is_bearish_outcome)
 
 HYPOTHESIS_ID = "m7_return20_vol20_minus5_post20"
 GROUPS = ("low_low", "low_high", "high_low", "high_high")
 STRICT_EVALUATION_MODES = ("strict_prospective", "prospective")
+
+
+def get_t5_readiness(db, *, today=None):
+    """Project the canonical, read-only T-5 audit for dashboard consumers."""
+    return audit_t5_signal_readiness(
+        db, provider=settings.market_data_provider, as_of_date=today or date.today())
 
 
 def classify_prospective_result(signal, spec=None):
@@ -246,22 +250,28 @@ def get_upcoming_lockups(db, *, today=None):
             "signal_created_at": signal.created_at if signal else None,
             "signal_locked_at": signal.created_at if signal else None,
             "calendar_days_to_event": (event_date - today).days if event_date else None})
-    requests = []
+    # One canonical service invocation batches price and attempt provenance for
+    # the entire cohort. Rendering never fetches data or mutates persistence.
+    audit = get_t5_readiness(db, today=today)
+    diagnostics = {item["lockup_id"]: item for item in audit["details"]
+                   if item.get("required_session_count")}
     for row in result:
-        if row["security_id"] is None:
-            continue
-        # The diagnostic has a canonical market-session identity of its own.
-        # Lifecycle fields can preserve historical calendar dates (including
-        # non-sessions), so they must not define the signal coverage window.
-        observation_session = resolve_observation_session(
-            row["lockup_event_date"], spec.observation_offset).observation_session
-        required = sessions_in_range(
-            session_offset(observation_session, -20), observation_session)
-        requests.append(DiagnosticRequest(row["lockup_id"], row["security_id"], required))
-    diagnostics = diagnose_market_data_windows(
-        db, requests, provider=settings.market_data_provider, as_of=today)
-    for row in result:
-        row["market_data_20d"] = diagnostics.get(row["lockup_id"])
+        readiness = diagnostics.get(row["lockup_id"])
+        row["t5_readiness"] = readiness
+        # Backward-compatible name for existing API consumers.
+        row["market_data_20d"] = ({
+            **readiness,
+            "status": readiness["readiness"],
+            "required_count": readiness["required_session_count"],
+            "present_count": readiness["present_session_count"],
+            "missing_count": readiness["missing_session_count"],
+            "known_no_data_sessions": readiness["known_no_data_dates"],
+            "unattempted_missing_count": readiness["unattempted_retryable_count"],
+            "attempted_missing_sessions": readiness["attempted_missing_dates"],
+            "unattempted_missing_sessions": readiness["unattempted_retryable_dates"],
+            "not_reached_count": readiness["future_not_reached_count"],
+            "not_reached_sessions": readiness["future_not_reached_dates"],
+        } if readiness else None)
     return result
 
 

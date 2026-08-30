@@ -140,6 +140,35 @@ def test_future_t5_is_not_reached_and_future_is_not_retryable():
     assert required[-1] == item["t5_observation_session"]
 
 
+def test_future_t5_with_historical_unattempted_session_remains_not_reached():
+    as_of = date.today()
+    db, _, security, _, required = _db(as_of + timedelta(days=25))
+    historical = [day for day in required if day <= as_of]
+    future = [day for day in required if day > as_of]
+    assert historical and future
+    for day in historical[1:]:
+        _bar(db, security, day)
+
+    item = _report(db, as_of=as_of)["details"][0]
+
+    assert item["readiness"] == "not_reached"
+    assert item["unattempted_retryable_dates"] == [historical[0]]
+    assert item["future_not_reached_dates"] == future
+
+
+def test_readiness_audit_batches_database_queries():
+    db, engine, _, _, _ = _db()
+    selects = []
+
+    def observe(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    _report(db)
+    assert len(selects) == 3  # cohort, all bars, all configured-provider attempts
+
+
 def test_read_only_and_json_date_serialization():
     db, engine, _, _, _ = _db()
     writes = []

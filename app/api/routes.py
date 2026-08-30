@@ -8,7 +8,8 @@ from app.models import (Company, DailyPrice, Filing, FilingDocument, IPO, IPOFac
 from app.services.ipo_ingest import ingest_registration_filings
 from app.services.research_dashboard import (
     GROUPS, get_historical_reference, get_prospective_evaluation, get_shadow_evaluation,
-    get_prospective_signal_rows, get_research_summary, get_upcoming_lockups,
+    get_prospective_signal_rows, get_research_summary, get_t5_readiness,
+    get_upcoming_lockups,
     hypothesis_metadata,
 )
 from app.services.pipeline_runs import get_pipeline_status
@@ -60,6 +61,11 @@ def research_pipeline_status(db: Session = Depends(get_db)):
 @router.get("/research/upcoming-lockups")
 def research_upcoming_lockups(db: Session = Depends(get_db)):
     return get_upcoming_lockups(db)
+
+
+@router.get("/research/t5-readiness")
+def research_t5_readiness(db: Session = Depends(get_db)):
+    return get_t5_readiness(db)
 
 
 @router.get("/research/prospective-signals")
