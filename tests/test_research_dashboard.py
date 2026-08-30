@@ -131,6 +131,38 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "known no-data" in page
 
 
+def test_hypothesis_explanation_uses_registry_values_and_preserves_evidence_roles():
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+    spec = FROZEN_HYPOTHESES[HYPOTHESIS_ID]
+
+    assert "What this hypothesis means" in page
+    assert "Momentum alone is not the hypothesis" in page
+    assert "Volatility alone is not the hypothesis" in page
+    assert "makes additional shares eligible for sale" in page
+    assert "M7 historical discovery is not out-of-sample performance" in page
+    assert "Strict M8 is the primary prospective evidence" in page
+    assert "never enters primary M8 results" in page
+    # Actual frozen values remain an API projection, never duplicated in prose.
+    assert "pct(x.feature1.threshold,true)" in page
+    assert "pct(x.feature2.threshold)" in page
+    assert str(spec.feature1_threshold) not in page
+    assert str(spec.feature2_threshold) not in page
+
+
+def test_market_data_explanation_maps_existing_diagnostic_provenance():
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+
+    for label in ("Complete", "Not reached", "Backfill candidate",
+                  "Provider exhausted", "Provider error"):
+        assert label in page
+    assert "Calendar determines which sessions are required" in page
+    assert "Missing sessions never redefine the trading-session sequence" in page
+    assert "Provider-exhausted gaps are an evidence-quality constraint" in page
+    assert "d.provider_error_count" in page
+    assert "d.unattempted_missing_count||d.attempted_missing_count" in page
+    assert "d.known_no_data_count===d.missing_count" in page
+
+
 def test_t5_signal_window_is_21_canonical_sessions_and_independent_of_snapshot_status():
     db, _historical_id, pending_id, _signaled_id = _dashboard_database()
     try:
