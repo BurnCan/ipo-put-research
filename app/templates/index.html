@@ -44,9 +44,6 @@
   <section class="panel historical" aria-labelledby="historical-title"><div class="section-heading"><div><span class="badge historical-badge">HISTORICAL DISCOVERY SAMPLE · NOT OUT-OF-SAMPLE</span><h2 id="historical-title">M7 historical reference</h2></div></div><p class="muted">Discovery context is shown separately and is not prospective performance.</p><div id="historical" class="loading">Loading historical reference…</div></section>
 </main>
 <script>
-// Legacy M8 projection labels retained for source-level compatibility:
-// <span>Bearish hits</span><strong>${esc(x.target_bearish_hits)}
-// <span>Bearish outcomes</span><strong>${esc(x.bearish_outcomes)}
 const $=s=>document.querySelector(s), groups=['low_low','low_high','high_low','high_high'];
 const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const valid=v=>v!==null&&v!==undefined&&Number.isFinite(Number(v));
