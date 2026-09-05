@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 import app.db
 from app.db import Base
 from app.models import PipelineRun, PipelineStageRun
+from app.services.event_analysis import SNAPSHOT_VERSION_V1, SNAPSHOT_VERSION_V2
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -345,6 +346,76 @@ def test_m8_updaters_pass_explicit_separate_evaluation_modes(monkeypatch):
     assert all(call[1]["hypothesis_id"] == pipeline.FROZEN_HYPOTHESIS_ID for call in calls)
     assert all({key: call[1][key] for key in pipeline.COHORT} == pipeline.COHORT
                for call in calls)
+
+
+def test_m6_analysis_runs_v1_and_v2_with_frozen_cohort(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        def __enter__(self):
+            return "db"
+
+        def __exit__(self, *args):
+            return None
+
+    fake_db = types.ModuleType("app.db")
+    fake_db.SessionLocal = FakeSession
+    fake_analysis = types.ModuleType("app.services.event_analysis")
+    fake_analysis.SNAPSHOT_VERSION_V1 = SNAPSHOT_VERSION_V1
+    fake_analysis.SNAPSHOT_VERSION_V2 = SNAPSHOT_VERSION_V2
+    fake_analysis.recompute_lockup_analyses = (
+        lambda db, **kwargs: calls.append((db, kwargs)) or {
+            "version": kwargs["snapshot_version"]})
+    monkeypatch.setitem(sys.modules, "app.db", fake_db)
+    monkeypatch.setitem(sys.modules, "app.services.event_analysis", fake_analysis)
+
+    result = pipeline.run_m6_analysis()
+
+    assert calls == [
+        ("db", {"recompute": False, "snapshot_version": SNAPSHOT_VERSION_V1,
+                **pipeline.COHORT}),
+        ("db", {"recompute": False, "snapshot_version": SNAPSHOT_VERSION_V2,
+                **pipeline.COHORT}),
+    ]
+    assert result == {
+        "v1": {"version": SNAPSHOT_VERSION_V1},
+        "v2": {"version": SNAPSHOT_VERSION_V2},
+    }
+
+
+def test_m6_analysis_preserves_v1_outcome_refresh_result(monkeypatch):
+    class FakeSession:
+        def __enter__(self):
+            return "db"
+
+        def __exit__(self, *args):
+            return None
+
+    class FakeReport:
+        def __init__(self, result):
+            self.result = result
+
+        def to_dict(self):
+            return self.result
+
+    def recompute(_db, **kwargs):
+        if kwargs["snapshot_version"] == SNAPSHOT_VERSION_V1:
+            return FakeReport({"outcomes_updated": 1})
+        return FakeReport({"canonical_snapshots_updated": 1})
+
+    fake_db = types.ModuleType("app.db")
+    fake_db.SessionLocal = FakeSession
+    fake_analysis = types.ModuleType("app.services.event_analysis")
+    fake_analysis.SNAPSHOT_VERSION_V1 = SNAPSHOT_VERSION_V1
+    fake_analysis.SNAPSHOT_VERSION_V2 = SNAPSHOT_VERSION_V2
+    fake_analysis.recompute_lockup_analyses = recompute
+    monkeypatch.setitem(sys.modules, "app.db", fake_db)
+    monkeypatch.setitem(sys.modules, "app.services.event_analysis", fake_analysis)
+
+    assert pipeline.run_m6_analysis() == {
+        "v1": {"outcomes_updated": 1},
+        "v2": {"canonical_snapshots_updated": 1},
+    }
 
 
 @pytest.mark.parametrize(
