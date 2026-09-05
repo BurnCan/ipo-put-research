@@ -7,7 +7,7 @@ from sqlalchemy import select
 from app.models import (Company, DailyPrice, IPO, IPOLockup, LockupEventAnalysis,
                         LockupProspectiveSignal, LockupSignalSnapshot, Security)
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
-from app.services.event_analysis.constants import OUTCOME_VERSION, SNAPSHOT_VERSION
+from app.services.event_analysis.constants import OUTCOME_VERSION, SNAPSHOT_VERSION_V2
 from app.services.event_analysis.lockup_snapshots import compute_snapshot
 from app.services.market_calendar import resolve_event_session, resolve_observation_session
 from app.services.market_data.coverage import feature_window_coverage
@@ -127,7 +127,7 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
         snapshot = db.scalar(select(LockupSignalSnapshot).where(
             LockupSignalSnapshot.lockup_id == lockup.id,
             LockupSignalSnapshot.observation_offset == spec.observation_offset,
-            LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION).order_by(LockupSignalSnapshot.id))
+            LockupSignalSnapshot.snapshot_version == SNAPSHOT_VERSION_V2).order_by(LockupSignalSnapshot.id))
         # Strict retains its existing immutable M6 identity. Shadow deliberately
         # uses only the canonical calendar session and never this legacy identity.
         observation_date = (existing.observation_date if existing is not None else
@@ -182,7 +182,8 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
                 if observation_date > today: report.pending_observation += 1
                 else: report.waiting_for_market_data += 1
                 continue
-            if snapshot.observation_date != observation_date:
+            if (snapshot.observation_date != observation_date
+                    or snapshot.snapshot_status != "complete"):
                 report.waiting_for_market_data += 1; continue
             values = (getattr(snapshot, spec.feature1), getattr(snapshot, spec.feature2))
         elif existing is None:

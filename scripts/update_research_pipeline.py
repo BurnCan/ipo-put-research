@@ -72,10 +72,11 @@ def run_market_history() -> Any:
 
 def run_m6_analysis() -> Any:
     from app.db import SessionLocal
-    from app.services.event_analysis import recompute_lockup_analyses
+    from app.services.event_analysis import SNAPSHOT_VERSION_V2, recompute_lockup_analyses
 
     with SessionLocal() as db:
-        return recompute_lockup_analyses(db, recompute=False, **COHORT)
+        return recompute_lockup_analyses(
+            db, recompute=False, snapshot_version=SNAPSHOT_VERSION_V2, **COHORT)
 
 
 def _run_m8_prospective(evaluation_mode: str, *, dry_run: bool = False) -> Any:

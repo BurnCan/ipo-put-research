@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.db import Base
 from app.models import (Company, DailyPrice, Filing, IPO, IPOLockup, LockupProspectiveSignal,
                         LockupSignalSnapshot, Security)
-from app.services.event_analysis.constants import SNAPSHOT_VERSION
+from app.services.event_analysis.constants import SNAPSHOT_VERSION_V1, SNAPSHOT_VERSION_V2
 from app.services.backtest.analysis import FROZEN_HYPOTHESES
 from app.services.prospective.signals import (_outcome_observation_date,
                                               update_prospective_lockup_signals)
@@ -80,7 +80,8 @@ def _database_with_snapshot(observation_date):
         observation_offset=-5, observation_date=observation_date,
         data_cutoff_date=observation_date, event_date=event_date,
         event_date_source="stated", event_trade_date=event_date,
-        snapshot_version=SNAPSHOT_VERSION, trading_sessions_to_event=5,
+        snapshot_version=SNAPSHOT_VERSION_V2, snapshot_status="complete",
+        trading_sessions_to_event=5,
         trading_sessions_since_first_trade=50, available_history_sessions=50,
         close=10, return_20d=.04, realized_vol_20d=.9,
         post_ipo_high_to_date=12, post_ipo_low_to_date=8))
@@ -113,6 +114,31 @@ def test_prospective_cutoff_is_exclusive(observation_date, expected_created,
             assert report.unavailable_observation_before_cutoff == 1
             assert evaluate_prospective_signals(
                 db, hypothesis_id=HYPOTHESIS_ID)["total_signals"] == 0
+    finally:
+        db.close()
+
+
+def test_strict_signal_uses_complete_v2_at_canonical_t5():
+    observation_date = CUTOFF + timedelta(days=1)
+    db = _database_with_snapshot(observation_date)
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        snapshot.return_20d = -.1191256831
+        snapshot.realized_vol_20d = .8862915844
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=observation_date)
+        signal = db.scalar(select(LockupProspectiveSignal))
+
+        assert report.signals_created == 1
+        assert report.waiting_for_market_data == 0
+        assert signal.observation_date == observation_date
+        assert signal.observation_date == resolve_observation_session(
+            signal.event_date, -5).observation_session
+        assert float(signal.feature1_value) == pytest.approx(-.1191256831)
+        assert float(signal.feature2_value) == pytest.approx(.8862915844)
+        assert signal.interaction_group == "low_high"
     finally:
         db.close()
 
@@ -239,6 +265,48 @@ def test_reached_t5_without_snapshot_waits_for_market_data():
 
         assert report.waiting_for_market_data == 1
         assert report.pending_observation == 0
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(("snapshot_status", "return_20d"), [
+    pytest.param("partial", .04, id="partial-v2"),
+    pytest.param("complete", None, id="null-frozen-feature"),
+])
+def test_invalid_v2_snapshot_waits_without_creating_signal(snapshot_status, return_20d):
+    observation_date = CUTOFF + timedelta(days=1)
+    db = _database_with_snapshot(observation_date)
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        snapshot.snapshot_status = snapshot_status
+        snapshot.return_20d = return_20d
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=observation_date)
+
+        assert report.signals_created == 0
+        assert report.waiting_for_market_data == 1
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
+    finally:
+        db.close()
+
+
+def test_valid_v1_snapshot_is_not_a_fallback_for_missing_v2():
+    observation_date = CUTOFF + timedelta(days=1)
+    db = _database_with_snapshot(observation_date)
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        snapshot.snapshot_version = SNAPSHOT_VERSION_V1
+        snapshot.snapshot_status = "complete"
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=observation_date)
+
+        assert report.signals_created == 0
+        assert report.waiting_for_market_data == 1
         assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
     finally:
         db.close()

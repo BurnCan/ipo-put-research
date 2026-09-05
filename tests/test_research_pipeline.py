@@ -347,6 +347,30 @@ def test_m8_updaters_pass_explicit_separate_evaluation_modes(monkeypatch):
                for call in calls)
 
 
+def test_m6_analysis_requests_canonical_v2_with_frozen_cohort(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        def __enter__(self):
+            return "db"
+
+        def __exit__(self, *args):
+            return None
+
+    fake_db = types.ModuleType("app.db")
+    fake_db.SessionLocal = FakeSession
+    fake_analysis = types.ModuleType("app.services.event_analysis")
+    fake_analysis.SNAPSHOT_VERSION_V2 = "2"
+    fake_analysis.recompute_lockup_analyses = (
+        lambda db, **kwargs: calls.append((db, kwargs)) or {})
+    monkeypatch.setitem(sys.modules, "app.db", fake_db)
+    monkeypatch.setitem(sys.modules, "app.services.event_analysis", fake_analysis)
+
+    pipeline.run_m6_analysis()
+
+    assert calls == [("db", {"recompute": False, "snapshot_version": "2", **pipeline.COHORT})]
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [([], 4), (["--skip-market-history"], 3), (["--skip-m6"], 3),
