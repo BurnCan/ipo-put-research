@@ -3,8 +3,8 @@ from datetime import UTC, date, datetime
 import httpx
 
 from app.services.market_data.options_feasibility import (
-    MassiveOptionsProbe, classify_feasibility, classify_http_failure, redact_url,
-    summarize_quote_fields,
+    MassiveOptionsProbe, ProviderResult, _audit_name, classify_feasibility,
+    classify_http_failure, redact_url, summarize_quote_fields,
 )
 
 
@@ -123,3 +123,67 @@ def test_historical_feasibility_summary_classifications():
                                         historical_bid_available=None,
                                         historical_ask_available=None,
                                         later_valuation_status="not_attempted")]) == "provider_not_suitable"
+
+
+def test_contract_discovery_uses_t5_liveness_not_plus20_survival():
+    requested = date(2024, 1, 8)
+
+    def response(request):
+        assert request.url.params["as_of"] == requested.isoformat()
+        assert request.url.params["expiration_date.gte"] == requested.isoformat()
+        return httpx.Response(200, json={"results": []})
+
+    MassiveOptionsProbe("key", client=_client(response)).discover_put_contracts(
+        "TEST", requested, expiration_on_or_after=requested)
+
+
+class _RecordingProbe:
+    name = "fake"
+
+    def __init__(self):
+        self.discovery_arguments = None
+        self.quote_dates = []
+
+    def discover_put_contracts(self, ticker, as_of, **kwargs):
+        self.discovery_arguments = (ticker, as_of, kwargs)
+        # Deliberately return later expiration first. Selection must use stable
+        # contract metadata, but must not prefer survival through +20.
+        return ProviderResult("ok", ({
+            "ticker": "O:TEST_LATER", "expiration_date": "2024-03-15",
+            "strike_price": 10, "contract_type": "put",
+        }, {
+            "ticker": "O:TEST_EARLY", "expiration_date": "2024-01-19",
+            "strike_price": 10, "contract_type": "put",
+        }))
+
+    def historical_quotes(self, symbol, day):
+        self.quote_dates.append((symbol, day))
+        return ProviderResult("ok", ({
+            "sip_timestamp": _timestamp(day), "bid_price": 1, "ask_price": 2,
+        },))
+
+
+def test_expiring_contract_still_establishes_entry_capability_without_post_expiry_calls():
+    probe = _RecordingProbe()
+    sample = {
+        "ticker": "TEST", "provider_symbol": "TEST", "t5_date": date(2024, 1, 8),
+        "event_date": date(2024, 1, 16), "event_session": date(2024, 1, 16),
+    }
+
+    result = _audit_name(probe, sample, date(2024, 3, 31))
+
+    assert probe.discovery_arguments[2]["expiration_on_or_after"] == sample["t5_date"]
+    assert result["selected_contract_symbol"] == "O:TEST_EARLY"
+    assert result["selected_contract_expiration_date"] == "2024-01-19"
+    assert result["contracts"][0]["expiration_date"] == "2024-01-19"
+    assert result["contract_expired_before_plus20"] is True
+    assert result["historical_bid_available"] is True
+    assert result["historical_ask_available"] is True
+    assert classify_feasibility([result]) == "historical_backtest_feasible"
+
+    expired = [item for item in result["later_valuations"]
+               if item["status"] == "contract_expired"]
+    assert {item["label"] for item in expired} == {"plus_5", "plus_10", "plus_20"}
+    assert all(item["error_category"] is None for item in expired)
+    assert all(day <= date(2024, 1, 19) for _symbol, day in probe.quote_dates)
+    assert {symbol for symbol, _day in probe.quote_dates} == {"O:TEST_EARLY"}

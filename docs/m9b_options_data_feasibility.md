@@ -8,15 +8,20 @@ historical bid and ask on that session?** This is a read-only data-capability
 audit. It adds no option schema, signal, score, entry rule, valuation rule, or
 backtest, and it does not alter M8 or M9A evidence.
 
-A historically valid backtest would require all of the following, without
-substitution or interpolation:
+A provider demonstrates historical **entry reconstruction** capability with
+the following, without substitution or interpolation:
 
 1. canonical event and T-5 sessions from the project's XNYS calendar;
 2. contract discovery explicitly **as of T-5**, including option symbol,
    underlying, put/call, expiration, and strike;
 3. a provider-stamped historical T-5 quote containing both bid and ask; and
-4. historical quotes for that same symbol on the event, +1, +5, +10, and +20
-   sessions (where those sessions have occurred).
+
+Same-contract **follow-up valuation** is a separate capability check. The audit
+requests historical quotes for the same symbol on the event, +1, +5, +10, and
++20 sessions only when the target session has occurred and is on or before the
+contract's validated expiration date. A target after expiration is reported as
+`contract_expired`; it is a normal contract-lifecycle outcome, not missing data
+or a provider failure. The expiration date itself remains eligible for probing.
 
 Last trade alone is inadequate. A current chain, current snapshot, or latest
 quote is not evidence for any historical date.
@@ -34,7 +39,7 @@ The implementation now probes three capabilities separately:
 
 | Capability | Massive request used | What counts as evidence |
 | --- | --- | --- |
-| Historical contract discovery | `GET /v3/reference/options/contracts` with `as_of`, `expired=true`, `contract_type=put`, and expiration no earlier than event +20 | A returned historical contract with a contract ticker |
+| Historical contract discovery | `GET /v3/reference/options/contracts` with `as_of=T-5`, `expired=true`, `contract_type=put`, and expiration no earlier than T-5 | A returned historical contract with a contract ticker and valid expiration showing that it was live on T-5 |
 | Historical bid/ask | `GET /v3/quotes/{optionsTicker}` bounded to the requested date | A returned quote whose provider timestamp resolves to that date; bid and ask are reported independently |
 | Current chain | `GET /v3/snapshot/options/{underlyingAsset}` | Current availability only; never historical evidence |
 
@@ -84,8 +89,11 @@ python scripts/audit_options_data_feasibility.py --tickers TICKER1 TICKER2 --lim
 The console gives a compact per-name summary. The optional JSON contains the
 contract metadata, T-5 field availability, each later-session result, explicit
 failure categories, tri-state aggregate capability fields, and one of the five
-required feasibility classifications. The output file is the only write made
-by the probe and is created only when `--output` is supplied.
+required feasibility classifications. The representative contract is selected
+deterministically by earliest expiration, then strike and ticker; selection
+does not consider survival to +20. The report also identifies contracts that
+expire before +20. The output file is the only write made by the probe and is
+created only when `--output` is supplied.
 
 ## Conclusion and next step
 
@@ -98,6 +106,8 @@ exists across the cohort.
 
 The next step is to run the bounded 10–15-name audit with the deployed database
 and current Massive key, retain the JSON result, and review both field coverage
-and denial categories. Design an options schema only if that evidence shows
-historical contract discovery, T-5 bid/ask, and same-contract follow-up
-valuation with adequate sample coverage.
+and denial categories. Historical capability is established by reconstructing
+a live T-5 contract and its T-5 bid/ask. Follow-up quote coverage should be
+reviewed separately for each reached session during that contract's lifetime;
+natural expiration before +20 does not make the provider historically
+incapable. Design an options schema only if the resulting evidence is adequate.
