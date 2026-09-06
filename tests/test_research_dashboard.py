@@ -129,7 +129,7 @@ def test_root_is_research_dashboard_without_legacy_actions_or_raw_row_navigation
     assert "Ingest last 365 days" not in page
     assert "window.location='/api/ipos/" not in page
     assert "v??'—'" in page  # the escaping helper has an explicit null fallback
-    assert "T-5 signal market data" in page
+    assert "T-5 market data" in page
     assert "Known no-data sessions" in page
 
 
@@ -302,8 +302,9 @@ def test_upcoming_rows_are_sorted_and_required_t5_is_calendar_derived():
         no_snapshot_id = _add_lockup(db, 4)
         db.commit()
         rows = get_upcoming_lockups(db, today=CUTOFF)
-        assert [row["lockup_event_date"] for row in rows] == sorted(
-            row["lockup_event_date"] for row in rows)
+        ordering = [(row["required_t5_date"], row["lockup_event_date"],
+                     row["ticker"], row["lockup_id"]) for row in rows]
+        assert ordering == sorted(ordering)
         row = next(row for row in rows if row["lockup_id"] == no_snapshot_id)
         assert row["required_t5_date"] == date(2026, 8, 24)
         assert row["stored_t5_snapshot_date"] is None
@@ -449,7 +450,7 @@ def test_no_stored_signal_is_not_projected_as_shadow():
         db.close()
 
 
-def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels():
+def test_upcoming_template_has_workflow_column_order_and_clear_feature_labels():
     page = Path("app/templates/index.html").read_text(encoding="utf-8")
     assert "UPCOMING_INITIAL_LIMIT=10" in page
     assert 'aria-expanded="false"' in page
@@ -461,10 +462,34 @@ def test_upcoming_template_has_collapsed_accessible_control_and_preserved_labels
     assert "Not eligible prospectively" in page
     assert "T-5 observation predates hypothesis freeze" in page
     assert "groups.reduce((n,g)=>n+x.groups[g].bearish_hit_count" not in page
-    for label in ("Pre-event 20d return", "Pre-event 20d realized vol",
-                  "Outcome status", "Post-event 20d return", "Result"):
+    labels = ("Ticker / company", "Stage status", "T-5 date", "T-5 20d return",
+              "T-5 20d realized vol", "Lockup / event date", "T-5 market data",
+              "Frozen group", "Outcome status", "Post-event 20d return", "Result")
+    header = page[page.index('<table class="upcoming-table">'):page.index(
+        '<tbody id="upcoming">')]
+    assert [header.index(f"<th>{label}</th>") for label in labels] == sorted(
+        header.index(f"<th>{label}</th>") for label in labels)
+    for label in labels:
         assert label in page
         assert f'data-label="{label}"' in page
+    assert "Pre-event 20d return" not in page
+    assert "Pre-event 20d realized vol" not in page
+    # Operational stage uses the canonical payload value, rather than deriving
+    # a lifecycle state from dates or replacing it with the evidence track.
+    assert "statusLabels[x.m8_status]||x.m8_status" in page
+    assert "const upcomingStatus=x=>x.prospective_track" not in page
+
+
+def test_dashboard_keeps_m9a_section_and_uses_dense_responsive_layout():
+    page = Path("app/templates/index.html").read_text(encoding="utf-8")
+    css = Path("app/static/app.css").read_text(encoding="utf-8")
+
+    assert 'id="m9a-title"' in page
+    assert 'id="m9a-observations"' in page
+    assert "json('/api/research/m9a-evaluation')" in page
+    assert "max-width:1680px" in css
+    assert "padding:9px 8px" in css
+    assert "@media(max-width:850px)" in css
 
 
 def test_result_classification_is_mature_only_target_aware_and_track_agnostic():
