@@ -99,7 +99,8 @@ def test_prospective_cutoff_is_exclusive(observation_date, expected_created,
     db = _database_with_snapshot(observation_date)
     try:
         report = update_prospective_lockup_signals(
-            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=CUTOFF)
+            db, hypothesis_id=HYPOTHESIS_ID,
+            as_of_date=max(CUTOFF, observation_date))
 
         assert report.signals_created == expected_created
         assert report.unavailable == expected_unavailable
@@ -224,6 +225,28 @@ def test_absent_snapshot_uses_calendar_and_remains_pending_before_t5():
         db.close()
 
 
+@pytest.mark.parametrize("snapshot_status", ["unavailable", "partial"])
+def test_materialized_future_v2_remains_pending_before_t5(snapshot_status):
+    observation_date = CUTOFF + timedelta(days=1)
+    db = _database_with_snapshot(observation_date)
+    try:
+        snapshot = db.scalar(select(LockupSignalSnapshot))
+        snapshot.snapshot_status = snapshot_status
+        if snapshot_status == "unavailable":
+            snapshot.unavailable_reason = "observation_session_not_reached"
+        db.commit()
+
+        report = update_prospective_lockup_signals(
+            db, hypothesis_id=HYPOTHESIS_ID, as_of_date=CUTOFF)
+
+        assert report.signals_created == 0
+        assert report.pending_observation == 1
+        assert report.waiting_for_market_data == 0
+        assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
+    finally:
+        db.close()
+
+
 def test_future_event_with_missed_calendar_t5_is_unavailable_without_bars():
     db = _database_with_snapshot(CUTOFF + timedelta(days=1))
     try:
@@ -287,6 +310,7 @@ def test_invalid_v2_snapshot_waits_without_creating_signal(snapshot_status, retu
             db, hypothesis_id=HYPOTHESIS_ID, as_of_date=observation_date)
 
         assert report.signals_created == 0
+        assert report.pending_observation == 0
         assert report.waiting_for_market_data == 1
         assert db.scalar(select(func.count()).select_from(LockupProspectiveSignal)) == 0
     finally:
