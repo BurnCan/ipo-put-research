@@ -164,6 +164,14 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             continue
         report.eligible_events += 1
         if evaluation_mode == SHADOW: report.shadow_eligible_events += 1
+        # Future canonical observations are pending regardless of whether M6 v2
+        # has already pre-materialized an unavailable or partial snapshot row.
+        # Existing strict signals bypass admission and retain their persisted
+        # observation identity and lifecycle authority.
+        if (existing is None and evaluation_mode == STRICT
+                and observation_date > today):
+            report.pending_observation += 1
+            continue
         if existing is None and evaluation_mode == SHADOW and today >= event_session:
             report.shadow_missed_lock_window += 1; continue
         security = db.scalar(select(Security).where(Security.company_id == ipo.company_id,
@@ -174,13 +182,8 @@ def update_prospective_lockup_signals(db, *, hypothesis_id, evaluation_mode=STRI
             continue
         values = None
         if existing is None and evaluation_mode == STRICT:
-            # A materialized M6 snapshot at the strict identity is authoritative
-            # even when an injected market as-of date precedes it.  Pending means
-            # that the required observation has not materialized, not that a
-            # valid frozen snapshot should be ignored.
             if snapshot is None:
-                if observation_date > today: report.pending_observation += 1
-                else: report.waiting_for_market_data += 1
+                report.waiting_for_market_data += 1
                 continue
             if (snapshot.observation_date != observation_date
                     or snapshot.snapshot_status != "complete"):
