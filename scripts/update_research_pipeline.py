@@ -9,7 +9,8 @@ import json
 import os
 import sys
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -37,7 +38,18 @@ def _now() -> str:
 
 
 def _jsonable(result: Any) -> Any:
-    return result.to_dict() if hasattr(result, "to_dict") else result
+    """Recursively normalize supported report values for JSON serialization."""
+    if hasattr(result, "to_dict"):
+        return _jsonable(result.to_dict())
+    if isinstance(result, dict):
+        return {key: _jsonable(value) for key, value in result.items()}
+    if isinstance(result, (list, tuple)):
+        return [_jsonable(value) for value in result]
+    if isinstance(result, (date, datetime)):
+        return result.isoformat()
+    if isinstance(result, Decimal):
+        return str(result)
+    return result
 
 
 @contextmanager
