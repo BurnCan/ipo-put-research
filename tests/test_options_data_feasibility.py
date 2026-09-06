@@ -3,7 +3,8 @@ from datetime import UTC, date, datetime
 import httpx
 
 from app.services.market_data.options_feasibility import (
-    MassiveOptionsProbe, ProviderResult, _audit_name, classify_feasibility,
+    MassiveOptionsProbe, ProviderResult, _aggregate_pair, _audit_name,
+    audit_options_feasibility, classify_feasibility,
     classify_http_failure, redact_url, summarize_quote_fields,
 )
 
@@ -96,6 +97,7 @@ def test_partial_bid_ask_fields_are_not_reported_as_complete():
 def _name(**overrides):
     row = {
         "contract_discovery_status": "historical_contracts_found",
+        "optionable_at_t5": True,
         "historical_bid_available": True,
         "historical_ask_available": True,
         "later_valuation_status": "historical_quotes_available",
@@ -112,17 +114,87 @@ def test_historical_feasibility_summary_classifications():
                                                   later_valuation_status="partially_available")]) == (
         "historical_backtest_partially_feasible")
     assert classify_feasibility([_name(contract_discovery_status="no_contracts",
+                                        optionable_at_t5=False,
                                         historical_bid_available=None,
                                         historical_ask_available=None,
                                         later_valuation_status="not_attempted",
                                         current_chain_status="current_chain_available")]) == (
-        "prospective_collection_only")
+        "cohort_not_optionable_at_t5")
     assert classify_feasibility([_name(error_category="entitlement_plan_restriction")]) == (
         "provider_entitlement_unknown")
-    assert classify_feasibility([_name(contract_discovery_status="no_contracts",
+    assert classify_feasibility([_name(contract_discovery_status="error",
+                                        optionable_at_t5=None,
                                         historical_bid_available=None,
                                         historical_ask_available=None,
-                                        later_valuation_status="not_attempted")]) == "provider_not_suitable"
+                                        later_valuation_status="not_attempted",
+                                        error_category="unsupported_endpoint")]) == (
+        "provider_not_suitable")
+    assert classify_feasibility([_name(contract_discovery_status="no_contracts",
+                                        optionable_at_t5=False,
+                                        historical_bid_available=None,
+                                        historical_ask_available=None,
+                                        later_valuation_status="not_attempted")]) == (
+        "cohort_not_optionable_at_t5")
+
+
+class _NoContractsProbe:
+    name = "fake"
+
+    def __init__(self, discovery):
+        self.discovery = discovery
+
+    def discover_put_contracts(self, _ticker, _as_of, **_kwargs):
+        return self.discovery
+
+    def current_chain(self, _ticker):
+        return ProviderResult("empty")
+
+
+def _sample():
+    return {
+        "ticker": "TEST", "provider_symbol": "TEST", "t5_date": date(2024, 1, 8),
+        "event_date": date(2024, 1, 16), "event_session": date(2024, 1, 16),
+    }
+
+
+def test_successful_empty_contract_lookup_means_not_optionable_not_provider_unsuitable():
+    result = _audit_name(_NoContractsProbe(ProviderResult(
+        "no_contracts", error_category="no_option_contracts", http_status=200)),
+        _sample(), date(2024, 3, 31))
+
+    assert result["optionable_at_t5"] is False
+    assert classify_feasibility([result]) == "cohort_not_optionable_at_t5"
+    assert _aggregate_pair([result]) is None
+
+
+def test_transient_contract_failure_leaves_optionability_unknown():
+    result = _audit_name(_NoContractsProbe(ProviderResult(
+        "error", error_category="transient_provider_network_error", http_status=503)),
+        _sample(), date(2024, 3, 31))
+
+    assert result["optionable_at_t5"] is None
+    assert classify_feasibility([result]) == "provider_capability_unknown"
+
+
+def test_reference_success_and_non_optionable_cohort_state_can_coexist(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_data.options_feasibility.select_sample",
+        lambda *_args, **_kwargs: [_sample()],
+    )
+    report = audit_options_feasibility(
+        None,
+        _NoContractsProbe(ProviderResult(
+            "no_contracts", error_category="no_option_contracts", http_status=200)),
+        as_of_date=date(2024, 3, 31),
+    )
+
+    assert report["historical_contract_discovery_supported"] is True
+    assert report["classification"] == "cohort_not_optionable_at_t5"
+    assert report["historical_bid_ask_supported"] is None
+    assert report["historical_followup_valuation_supported"] is None
+    assert report["optionable_at_t5_count"] == 0
+    assert report["not_optionable_at_t5_count"] == 1
+    assert report["optionability_unknown_count"] == 0
 
 
 def test_contract_discovery_uses_t5_liveness_not_plus20_survival():
