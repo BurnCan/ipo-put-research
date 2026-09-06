@@ -190,8 +190,7 @@ def classify_feasibility(names: list[dict[str, Any]]) -> str:
     complete = [item for item in names if
                 item.get("contract_discovery_status") == "historical_contracts_found" and
                 item.get("historical_bid_available") is True and
-                item.get("historical_ask_available") is True and
-                item.get("later_valuation_status") == "historical_quotes_available"]
+                item.get("historical_ask_available") is True]
     partial = [item for item in names if item.get("contract_discovery_status") ==
                "historical_contracts_found" and (item.get("historical_bid_available") is True or
                item.get("historical_ask_available") is True or
@@ -287,11 +286,25 @@ def _aggregate_pair(names):
     return True if all(complete) else (None if any(complete) else False)
 
 
-def _contract_metadata(item):
-    return {field: item.get(field) for field in (
+def _parse_expiration(value: Any) -> date | None:
+    """Return a validated provider expiration date, never an inferred value."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _contract_metadata(item, expiration_date):
+    metadata = {field: item.get(field) for field in (
         "ticker", "underlying_ticker", "expiration_date", "strike_price",
         "contract_type", "exercise_style", "shares_per_contract", "primary_exchange",
     )}
+    # Normalize only after parsing so the report never treats arbitrary provider
+    # text as contract-lifecycle metadata.
+    metadata["expiration_date"] = expiration_date.isoformat()
+    return metadata
 
 
 def _audit_name(probe, sample, as_of):
@@ -302,9 +315,11 @@ def _audit_name(probe, sample, as_of):
               "historical_bid_available": None, "historical_ask_available": None,
               "later_valuation_status": "not_attempted", "later_valuations": [],
               "current_chain_status": "not_attempted", "error_category": None, "notes": []}
-    last_followup = session_offset(sample["event_session"], 20)
     discovered = probe.discover_put_contracts(
-        sample["provider_symbol"], sample["t5_date"], expiration_on_or_after=last_followup)
+        sample["provider_symbol"], sample["t5_date"],
+        # expired=true makes historical contracts visible; this lower bound
+        # excludes contracts which were already expired on the as-of session.
+        expiration_on_or_after=sample["t5_date"])
     if discovered.status != "ok":
         result["contract_discovery_status"] = discovered.status
         result["error_category"] = discovered.error_category
@@ -314,15 +329,31 @@ def _audit_name(probe, sample, as_of):
             result["current_chain_status"] = ("current_chain_available" if current.results else current.status)
             if current.note: result["notes"].append(f"current chain: {current.note}")
         return result
-    result["contract_discovery_status"] = "historical_contracts_found"
-    result["put_contracts_found"] = len(discovered.results)
-    result["contracts"] = [_contract_metadata(item) for item in discovered.results]
-    contract_symbol = discovered.results[0].get("ticker")
-    if not isinstance(contract_symbol, str) or not contract_symbol:
+    valid_contracts = []
+    for item in discovered.results:
+        expiration = _parse_expiration(item.get("expiration_date"))
+        symbol = item.get("ticker")
+        if expiration is not None and expiration >= sample["t5_date"] and isinstance(symbol, str) and symbol:
+            valid_contracts.append((expiration, symbol, item))
+    if not valid_contracts:
         result["contract_discovery_status"] = "malformed_contract_metadata"
         result["error_category"] = "malformed_unexpected_response"
-        result["notes"].append("historical contract lacked a contract ticker")
+        result["notes"].append("historical contracts lacked a valid live expiration date or ticker")
         return result
+    # Selection is deterministic and depends only on T-5-live contract metadata,
+    # not on whether a contract survives any future analysis horizon.
+    valid_contracts.sort(key=lambda contract: (
+        contract[0], str(contract[2].get("strike_price") or ""), contract[1]))
+    result["contract_discovery_status"] = "historical_contracts_found"
+    result["put_contracts_found"] = len(valid_contracts)
+    result["contracts"] = [_contract_metadata(item, expiration)
+                           for expiration, _symbol, item in valid_contracts]
+    expiration_date, contract_symbol, _ = valid_contracts[0]
+    result["selected_contract_symbol"] = contract_symbol
+    result["selected_contract_expiration_date"] = expiration_date.isoformat()
+    result["contract_selection_method"] = "earliest_expiration_then_strike_then_ticker"
+    plus_20 = session_offset(sample["event_session"], 20)
+    result["contract_expired_before_plus20"] = expiration_date < plus_20
     quotes = probe.historical_quotes(contract_symbol, sample["t5_date"])
     if quotes.status != "ok":
         result["historical_quote_status"] = quotes.status
@@ -340,6 +371,12 @@ def _audit_name(probe, sample, as_of):
             result["later_valuations"].append({"label": label, "date": day.isoformat(),
                                                "status": "not_reached"})
             continue
+        if day > expiration_date:
+            result["later_valuations"].append({
+                "label": label, "date": day.isoformat(), "status": "contract_expired",
+                "bid_available": None, "ask_available": None, "error_category": None,
+            })
+            continue
         followup = probe.historical_quotes(contract_symbol, day)
         entry = {"label": label, "date": day.isoformat(), "status": followup.status,
                  "bid_available": False, "ask_available": False,
@@ -352,8 +389,10 @@ def _audit_name(probe, sample, as_of):
         result["later_valuations"].append(entry)
         if followup.error_category in {"authentication_failure", "entitlement_plan_restriction"}:
             result["error_category"] = followup.error_category
-    reached = [item for item in result["later_valuations"] if item["status"] != "not_reached"]
+    reached = [item for item in result["later_valuations"]
+               if item["status"] not in {"not_reached", "contract_expired"}]
     full = [item for item in reached if item["bid_available"] and item["ask_available"]]
-    result["later_valuation_status"] = ("historical_quotes_available" if reached and len(full) == len(reached)
-                                         else "partially_available" if full else "unavailable")
+    result["later_valuation_status"] = (
+        "historical_quotes_available" if reached and len(full) == len(reached)
+        else "partially_available" if full else "unavailable" if reached else "contract_expired")
     return result
