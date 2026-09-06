@@ -50,14 +50,23 @@ These paths and parameters correspond to Massive's published
 interfaces. Documentation exposure establishes that an interface exists; it
 does **not** establish the configured account's entitlement or historical depth.
 
-## Account entitlement and sample result
+## Live capability and optionability findings
 
-No Massive API key is present in the repository environment, so no live request
-was made while implementing M9B and there is no defensible live sample result
-to record here. In particular, historical T-5 put bid/ask is **not yet observed
-as obtainable** and account entitlement remains untested. This is deliberately
-reported as unknown rather than inferred from documentation or from a current
-chain.
+Historical Massive contract-reference control queries succeeded for SPY and
+AAPL as of 2026-09-04 and returned historical puts. This establishes that the
+provider can perform the required historical contract-reference lookup. It is
+separate from whether a particular cohort company had listed puts.
+
+The first three prospective names to reach canonical T-5 had no historical put
+contracts at T-5: TRGS on 2026-08-18, GENB on 2026-08-19, and SWMR on
+2026-09-04. Each lookup completed successfully with an empty result, so each is
+reported as `optionable_at_t5=false`. This is an **optionability constraint**,
+not a provider-capability failure. Three observations are far too few to infer
+or present a stable optionability rate for the cohort.
+
+Because none of those names supplied a real historical contract on which to
+request quotes, historical T-5 bid/ask and later-valuation capabilities remain
+untested and are reported as `null`, not `false`.
 
 At runtime the script selects up to 12 reached-T-5 names from the existing
 classified, priced operating-company cohort with a selected primary lockup. It
@@ -88,8 +97,9 @@ python scripts/audit_options_data_feasibility.py --tickers TICKER1 TICKER2 --lim
 
 The console gives a compact per-name summary. The optional JSON contains the
 contract metadata, T-5 field availability, each later-session result, explicit
-failure categories, tri-state aggregate capability fields, and one of the five
-required feasibility classifications. The representative contract is selected
+failure categories, per-name tri-state `optionable_at_t5`, optionability summary
+counts, tri-state aggregate capability fields, and an explicit feasibility
+classification. The representative contract is selected
 deterministically by earliest expiration, then strike and ticker; selection
 does not consider survival to +20. The report also identifies contracts that
 expire before +20. The output file is the only write made by the probe and is
@@ -97,17 +107,15 @@ created only when `--output` is supplied.
 
 ## Conclusion and next step
 
-**Present conclusion: `provider_entitlement_unknown` operationally, pending a
-credentialed run.** Massive publishes interfaces relevant to all three checks,
-and this repository can now test them without confusing current with
-historical observations. However, published endpoints alone do not answer
-whether this account can retrieve T-5 bid/ask or whether the necessary history
-exists across the cohort.
+**Present cohort conclusion: `cohort_not_optionable_at_t5`.** Historical
+contract-reference capability has been demonstrated by the SPY and AAPL
+controls, while all three reached-T-5 prospective names returned no puts. Quote
+capability remains unknown until an optionable cohort name appears; an empty
+contract result cannot test it.
 
-The next step is to run the bounded 10–15-name audit with the deployed database
-and current Massive key, retain the JSON result, and review both field coverage
-and denial categories. Historical capability is established by reconstructing
-a live T-5 contract and its T-5 bid/ask. Follow-up quote coverage should be
-reviewed separately for each reached session during that contract's lifetime;
-natural expiration before +20 does not make the provider historically
-incapable. Design an options schema only if the resulting evidence is adequate.
+The next step is to continue the bounded audit as more prospective names reach
+T-5. Once a name has a valid historical put, its T-5 bid/ask and same-contract
+follow-up quotes can test the still-unresolved quote capabilities. Follow-up
+coverage should be reviewed separately for each reached session during that
+contract's lifetime; natural expiration before +20 does not make the provider
+historically incapable.

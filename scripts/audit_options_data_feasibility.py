@@ -46,8 +46,13 @@ def main():
     print("Historical contract discovery: " + str(report["historical_contract_discovery_supported"]))
     print("Historical T-5 bid/ask: " + str(report["historical_bid_ask_supported"]))
     print("Historical later valuation: " + str(report["historical_followup_valuation_supported"]))
+    print("T-5 optionability: "
+          f"optionable={report['optionable_at_t5_count']}, "
+          f"not_optionable={report['not_optionable_at_t5_count']}, "
+          f"unknown={report['optionability_unknown_count']}")
     for item in report["names"]:
         print(f"- {item['ticker']} T-5 {item['t5_date']}: "
+              f"optionable={item['optionable_at_t5']}, "
               f"contracts={item['contract_discovery_status']}, "
               f"quotes={item['historical_quote_status']}, "
               f"follow-up={item['later_valuation_status']}, "

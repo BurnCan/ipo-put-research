@@ -27,6 +27,7 @@ SENSITIVE_QUERY_KEYS = {"apikey", "api_key", "token", "access_token", "key", "se
 FEASIBILITY_CLASSIFICATIONS = {
     "historical_backtest_feasible", "historical_backtest_partially_feasible",
     "prospective_collection_only", "provider_entitlement_unknown", "provider_not_suitable",
+    "provider_capability_unknown", "cohort_not_optionable_at_t5",
 }
 
 
@@ -183,7 +184,7 @@ def summarize_quote_fields(quotes: tuple[dict[str, Any], ...]) -> dict[str, Any]
 
 def classify_feasibility(names: list[dict[str, Any]]) -> str:
     if not names:
-        return "provider_not_suitable"
+        return "provider_capability_unknown"
     if any(item.get("error_category") in {
             "authentication_failure", "entitlement_plan_restriction"} for item in names):
         return "provider_entitlement_unknown"
@@ -199,9 +200,15 @@ def classify_feasibility(names: list[dict[str, Any]]) -> str:
         return "historical_backtest_feasible"
     if complete or partial:
         return "historical_backtest_partially_feasible"
+    if any(item.get("error_category") == "unsupported_endpoint" for item in names):
+        return "provider_not_suitable"
+    resolved_optionability = [item.get("optionable_at_t5") for item in names
+                              if item.get("optionable_at_t5") is not None]
+    if resolved_optionability and not any(resolved_optionability):
+        return "cohort_not_optionable_at_t5"
     if any(item.get("current_chain_status") == "current_chain_available" for item in names):
         return "prospective_collection_only"
-    return "provider_not_suitable"
+    return "provider_capability_unknown"
 
 
 def select_sample(db, *, as_of_date: date, limit: int = 12,
@@ -249,15 +256,21 @@ def audit_options_feasibility(db, probe: MassiveOptionsProbe, *, as_of_date: dat
     sampled = select_sample(db, as_of_date=as_of_date, limit=limit, tickers=tickers)
     names = [_audit_name(probe, item, as_of_date) for item in sampled]
     classification = classify_feasibility(names)
+    optionability = [item["optionable_at_t5"] for item in names]
     return {
         "provider": probe.name, "run_at": datetime.now(UTC).isoformat(),
         "as_of_date": as_of_date.isoformat(), "sample_size": len(names),
         "classification": classification,
-        "historical_contract_discovery_supported": _aggregate_boolean(
-            names, "contract_discovery_status", "historical_contracts_found"),
+        # A valid HTTP response from the historical reference endpoint proves
+        # reference capability even when this cohort has no contracts.
+        "historical_contract_discovery_supported": _aggregate_membership(
+            names, "contract_discovery_status", {"historical_contracts_found", "no_contracts"}),
         "historical_bid_ask_supported": _aggregate_pair(names),
-        "historical_followup_valuation_supported": _aggregate_boolean(
+        "historical_followup_valuation_supported": _aggregate_optionable_boolean(
             names, "later_valuation_status", "historical_quotes_available"),
+        "optionable_at_t5_count": optionability.count(True),
+        "not_optionable_at_t5_count": optionability.count(False),
+        "optionability_unknown_count": optionability.count(None),
         "entitlement_blocked": classification == "provider_entitlement_unknown",
         "findings": [
             "Historical support is credited only for as_of contract discovery and date-stamped quotes.",
@@ -278,7 +291,20 @@ def _aggregate_boolean(names, field, success):
     return False
 
 
+def _aggregate_membership(names, field, successes):
+    if not names:
+        return None
+    resolved = [item.get(field) in successes for item in names]
+    return True if all(resolved) else (None if any(resolved) else False)
+
+
+def _aggregate_optionable_boolean(names, field, success):
+    optionable = [item for item in names if item.get("optionable_at_t5") is True]
+    return _aggregate_boolean(optionable, field, success)
+
+
 def _aggregate_pair(names):
+    names = [item for item in names if item.get("optionable_at_t5") is True]
     if not names:
         return None
     complete = [item.get("historical_bid_available") is True and
@@ -311,6 +337,7 @@ def _audit_name(probe, sample, as_of):
     result = {**{key: value.isoformat() if isinstance(value, date) else value
                  for key, value in sample.items() if key != "provider_symbol"},
               "contract_discovery_status": "not_attempted", "put_contracts_found": 0,
+              "optionable_at_t5": None,
               "contracts": [], "historical_quote_status": "not_attempted",
               "historical_bid_available": None, "historical_ask_available": None,
               "later_valuation_status": "not_attempted", "later_valuations": [],
@@ -322,6 +349,8 @@ def _audit_name(probe, sample, as_of):
         expiration_on_or_after=sample["t5_date"])
     if discovered.status != "ok":
         result["contract_discovery_status"] = discovered.status
+        if discovered.status == "no_contracts":
+            result["optionable_at_t5"] = False
         result["error_category"] = discovered.error_category
         result["notes"].append(discovered.note)
         if discovered.error_category not in {"authentication_failure", "entitlement_plan_restriction"}:
@@ -345,6 +374,7 @@ def _audit_name(probe, sample, as_of):
     valid_contracts.sort(key=lambda contract: (
         contract[0], str(contract[2].get("strike_price") or ""), contract[1]))
     result["contract_discovery_status"] = "historical_contracts_found"
+    result["optionable_at_t5"] = True
     result["put_contracts_found"] = len(valid_contracts)
     result["contracts"] = [_contract_metadata(item, expiration)
                            for expiration, _symbol, item in valid_contracts]
