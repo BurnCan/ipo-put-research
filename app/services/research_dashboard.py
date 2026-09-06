@@ -294,6 +294,12 @@ def get_upcoming_lockups(db, *, today=None, t5_readiness=None):
             "not_reached_count": readiness["future_not_reached_count"],
             "not_reached_sessions": readiness["future_not_reached_dates"],
         } if readiness else None)
+    # Presentation order follows the operating workflow: the next canonical
+    # observation first, then event date and stable identity tie-breakers.
+    # All keys are existing projected values; no lifecycle state is recomputed.
+    result.sort(key=lambda row: (
+        row["required_t5_date"], row["lockup_event_date"],
+        row["ticker"] or "", row["lockup_id"]))
     return result
 
 
