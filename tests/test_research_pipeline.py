@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import types
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -72,6 +74,72 @@ def test_success_order_results_timestamps_cohort_and_frozen_hypothesis(monkeypat
         "offering_status": "priced",
         "primary_lockup_only": True,
     }
+
+
+def test_jsonable_recursively_normalizes_nested_dates_and_sequences():
+    result = {
+        "preview": [
+            {
+                "canonical_t5": date(2026, 9, 4),
+                "event_session": date(2026, 9, 13),
+            }
+        ],
+        "range": (date(2026, 9, 1), None),
+    }
+
+    normalized = pipeline._jsonable(result)
+
+    assert normalized == {
+        "preview": [
+            {"canonical_t5": "2026-09-04", "event_session": "2026-09-13"}
+        ],
+        "range": ["2026-09-01", None],
+    }
+    assert json.loads(json.dumps(normalized)) == normalized
+
+
+def test_jsonable_normalizes_nested_datetime_and_decimal():
+    timestamp = datetime(2026, 9, 5, 12, 34, 56, tzinfo=UTC)
+    normalized = pipeline._jsonable({"timestamp": timestamp, "value": Decimal("1.2300")})
+
+    assert normalized == {"timestamp": "2026-09-05T12:34:56+00:00", "value": "1.2300"}
+    assert json.loads(json.dumps(normalized)) == normalized
+
+
+def test_jsonable_recurses_into_report_to_dict_result():
+    class Report:
+        def to_dict(self):
+            return {
+                "preview": [{"canonical_t5": date(2026, 9, 4)}],
+                "generated_at": datetime(2026, 9, 5, 8, 0, tzinfo=UTC),
+            }
+
+    normalized = pipeline._jsonable(Report())
+
+    assert normalized == {
+        "preview": [{"canonical_t5": "2026-09-04"}],
+        "generated_at": "2026-09-05T08:00:00+00:00",
+    }
+    json.dumps(normalized)
+
+
+def test_pipeline_report_with_m8_preview_dates_is_json_serializable():
+    preview = [{
+        "canonical_t5": date(2026, 9, 4),
+        "event_session": date(2026, 9, 13),
+    }]
+    report = pipeline.run_pipeline(
+        skip_market_history=True,
+        skip_m6=True,
+        m8_strict_stage=lambda **kwargs: {"preview": preview},
+        m8_shadow_stage=lambda **kwargs: {"preview": []},
+    )
+
+    assert report["stages"]["m8_strict_prospective"]["result"]["preview"] == [{
+        "canonical_t5": "2026-09-04",
+        "event_session": "2026-09-13",
+    }]
+    json.dumps(report)
 
 
 @pytest.mark.parametrize("failed_stage", ["market", "m6"])
