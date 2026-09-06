@@ -478,6 +478,12 @@ def test_upcoming_template_has_workflow_column_order_and_clear_feature_labels():
     # a lifecycle state from dates or replacing it with the evidence track.
     assert "statusLabels[x.m8_status]||x.m8_status" in page
     assert "const upcomingStatus=x=>x.prospective_track" not in page
+    assert "x.m8_status==='awaiting_event'?`Event: ${date(x.lockup_event_date)}`" in page
+    assert "x.m8_status==='awaiting_outcome'" in page
+    assert "x.m8_status==='matured'" in page
+    assert "${esc(stageDetail(x))}" in page
+    assert "${esc(t5Detail(x))}</small></td><td data-label=\"T-5 date\"" not in page
+    assert '<td data-label="T-5 date">${date(x.required_t5_date)}' in page
 
 
 def test_dashboard_keeps_m9a_section_and_uses_dense_responsive_layout():
@@ -487,9 +493,11 @@ def test_dashboard_keeps_m9a_section_and_uses_dense_responsive_layout():
     assert 'id="m9a-title"' in page
     assert 'id="m9a-observations"' in page
     assert "json('/api/research/m9a-evaluation')" in page
-    assert "max-width:1680px" in css
+    assert "max-width:1680px" not in css
+    assert "main{width:100%;max-width:none;margin:0;padding:20px 10px 48px}" in css
     assert "padding:9px 8px" in css
     assert "@media(max-width:850px)" in css
+    assert "@media(max-width:850px){main{padding:24px 16px}" in css
 
 
 def test_result_classification_is_mature_only_target_aware_and_track_agnostic():
